@@ -1,0 +1,53 @@
+name: Deploy Telegram
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "README.md"
+      - ".gitignore"
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, macOS, ARM64, main]
+  
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: telegram
+
+      - name: Deploy
+        run : |
+          rsync -av --delete \
+            --exclude '.env' \
+            --exclude '.venv' \
+            --exclude 'venv' \
+            --exclude '*.session' \
+            --exclude '*.session-journal' \
+            --exclude '*.db' \
+            --exclude '*.db-shm' \
+            --exclude '*.db-wal' \
+            --exclude '*.sh' \
+            --exclude '*.json' \
+            telegram/ ~/telegram-bot/
+
+      - name: Install Dependency
+        run: |
+          cd ~/telegram-bot
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip3 install --upgrade pip
+          pip3 install -r requirements.txt
+
+      - name: Syntax Check
+        run : |
+          cd ~/telegram-bot
+          . .venv/bin/activate
+          python3 -m py_compile main.py
+
+      - name: Restart bot
+        run: |
+          sudo launchctl bootout system /Library/LaunchDaemons/com.telegram-bot.plist 2>/dev/null || true
+          sudo launchctl bootstrap system /Library/LaunchDaemons/com.telegram-bot.plist
+          sudo launchctl kickstart -k system/com.telegram-bot
