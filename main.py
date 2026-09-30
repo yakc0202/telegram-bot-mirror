@@ -30,7 +30,6 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 from urllib.parse import urlsplit
 
 # .env를 실행 위치와 무관하게 고정된 경로에서 읽음 (cron/systemd 등 다른 작업 디렉토리에서
@@ -175,53 +174,6 @@ def set_digest_sent_time(trigger_hour: int, iso_timestamp: str):
     os.replace(tmp_path, DIGEST_SENT_STATE_PATH)
 
 
-# 어떤 종목이 마지막으로 언제 '실적 리뷰'에 포함됐는지 기록(같은 이유로 DB가 아닌 별도
-# JSON 파일에 저장 — digest_sent_state.json과 동일한 패턴). {"MU": "2026-08-03", ...}
-REVIEWED_EARNINGS_STATE_PATH = os.environ.get("REVIEWED_EARNINGS_STATE_PATH") or str(
-    Path(DB_PATH).parent / "reviewed_earnings_state.json"
-)
-
-
-def get_reviewed_earnings_state() -> dict:
-    try:
-        with open(REVIEWED_EARNINGS_STATE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
-
-
-def recently_reviewed_symbols(within_days: Optional[int] = None) -> set:
-    """최근 within_days일 내에 이미 실적 리뷰에 포함됐던 티커 집합(대문자)을 반환."""
-    if within_days is None:
-        within_days = EARNINGS_REVIEW_DEDUP_DAYS  # 모듈 하단에서 정의되므로 호출 시점에 참조
-    data = get_reviewed_earnings_state()
-    cutoff = datetime.now(timezone.utc).date() - timedelta(days=within_days)
-    result = set()
-    for symbol, iso_date in data.items():
-        try:
-            d = datetime.fromisoformat(iso_date).date()
-        except ValueError:
-            continue
-        if d >= cutoff:
-            result.add(symbol.upper())
-    return result
-
-
-def mark_earnings_reviewed(symbols: list):
-    """오늘 실제로 정리에 포함된 티커들을 리뷰 완료로 기록. 원자적 쓰기로 손상 방지."""
-    symbols = [s.upper() for s in symbols if s]
-    if not symbols:
-        return
-    data = get_reviewed_earnings_state()
-    today_iso = datetime.now(timezone.utc).date().isoformat()
-    for symbol in symbols:
-        data[symbol] = today_iso
-    tmp_path = REVIEWED_EARNINGS_STATE_PATH + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f)
-    os.replace(tmp_path, REVIEWED_EARNINGS_STATE_PATH)
-
-
 # 사진/미디어를 메모리 대신 디스크로 내려받을 때 쓰는 임시 폴더. 매번 os.remove로 지우지만,
 # 혹시 비정상 종료(SIGKILL 등)로 정리가 안 된 파일이 남아있을 수 있어 시작 시 한 번 청소함.
 TEMP_MEDIA_DIR = os.environ.get("TEMP_MEDIA_DIR") or str(Path(tempfile.gettempdir()) / "telegram_stock_dedup_media")
@@ -329,14 +281,6 @@ if LLM_PROVIDER == "openai" and not OPENAI_API_KEY:
     raise RuntimeError("LLM_PROVIDER=openai 인데 OPENAI_API_KEY가 .env에 없습니다.")
 if LLM_PROVIDER == "gemini" and not GEMINI_API_KEYS:
     raise RuntimeError("LLM_PROVIDER=gemini 인데 GEMINI_API_KEY(S)가 .env에 없습니다.")
-
-# 미국 실적 캘린더/실제 발표 결과(EPS 등) 조회용 (finnhub.io 무료 발급). 없으면 실적
-# 발표/리뷰 섹션이 예전처럼 텔레그램 텍스트만으로 LLM이 추정하는 방식으로 자동 폴백됨.
-FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY")
-# 한 번 실적 리뷰에 포함된 회사는 이 기간(일) 동안 다시 리뷰 후보에 올리지 않음 — 발표 후
-# 며칠간 후속 코멘트가 계속 올라와서 같은 실적이 매 정리마다 "새 리뷰 대상"으로 다시 뽑히고,
-# 그때그때 판단이 뒤집히는 문제를 방지하기 위함.
-EARNINGS_REVIEW_DEDUP_DAYS = int(os.environ.get("EARNINGS_REVIEW_DEDUP_DAYS", 5))
 
 # 1순위 LLM_PROVIDER 호출이 실패(크레딧 소진 등)하면 순서대로 시도할 대체 provider 목록.
 # 해당 provider의 API 키가 없으면 자동으로 건너뜀. 예: LLM_FALLBACK_PROVIDERS=openai,gemini
@@ -1804,21 +1748,46 @@ MARKET_QUANT_TICKERS = {
     "S&P 500": "^GSPC",
     "나스닥 100": "^NDX",
     "러셀 2000": "^RUT",
-    "미국 10년물 국채금리": "^TNX",
-    # yfinance/Yahoo Finance에는 미국 2년물 국채 '금리' 지수 티커가 따로 없어서, 금리
-    # 방향성의 대리 지표로 단기 국채 ETF(SHY, 1~3년물)를 대신 사용함. SHY 가격은 금리와
-    # 반대로 움직이므로(금리↑ → 채권가격↓), 해석 시 부호를 반대로 봐야 함
-    "미국 2년물 국채 프록시(SHY ETF, 금리와 반대로 움직임)": "SHY",
     "VIX 공포지수": "^VIX",
     "필라델피아 반도체지수": "^SOX",
+    "달러인덱스(DXY)": "DX-Y.NYB",
+    "원/달러": "KRW=X",
+    "Brent유": "BZ=F",
+    "WTI유": "CL=F",
+    "Henry Hub 천연가스": "NG=F",
+    "유럽 TTF 천연가스": "TTF=F",
+    # 아래 둘은 최종 텍스트에 그대로 노출하지 않고, 3-2-1 정제마진(크랙 스프레드) 계산에만
+    # 씀(compute_crack_spread_321 참고) — format_quant_data_text에서 필터링됨
+    "RBOB 가솔린(크랙 스프레드 계산용)": "RB=F",
+    "난방유(크랙 스프레드 계산용)": "HO=F",
+}
+
+# 오후(18시) 정리에서만 추가로 조회하는 아시아 지수 — 오전엔 아직 장이 열리지 않았거나
+# 막 열린 시점이라 의미가 없어서 제외함
+ASIA_QUANT_TICKERS = {
+    "코스피": "^KS11",
+    "코스닥": "^KQ11",
+    "니케이225": "^N225",
+    "항셍지수": "^HSI",
+    "상해종합지수": "000001.SS",
+}
+
+# FRED(세인트루이스 연준)에서 API 키 없이 받을 수 있는 공개 CSV로 조회하는 금리 시계열.
+# yfinance에는 10년 실질금리(TIPS)나 기대인플레이션(BEI) 지수가 없어서 FRED로 별도 조회함.
+# 값 단위는 전부 %이므로 전일 대비 변화는 %p가 아니라 bp(basis point)로 표기.
+FRED_RATE_SERIES = {
+    "미국 10년물 명목금리": "DGS10",
+    "미국 2년물 명목금리": "DGS2",
+    "미국 10년 TIPS 실질금리": "DFII10",
+    "미국 10년 기대인플레이션(BEI)": "T10YIE",
 }
 
 
-def fetch_market_quant_data() -> Optional[dict]:
-    """yfinance로 주요 시장 지표(3대 지수, 국채금리, VIX, 반도체지수)의 현재가와 전일 대비
-    등락률을 조회해서 {지표명: {"value": 현재가, "change_pct": 등락률}} 형태로 반환.
-    yfinance가 설치 안 돼있거나 네트워크 문제로 실패해도 정리 기능 전체가 죽지 않도록 항상
-    안전하게 None을 반환함(그 경우 정량 데이터 없이 텔레그램 텍스트만으로 정리가 생성됨)."""
+def _fetch_yfinance_quant(tickers: dict) -> Optional[dict]:
+    """yfinance로 tickers({지표명: 티커}) 각각의 최신 종가/전일 종가/등락률을 조회해서
+    {지표명: {"value", "prev_value", "change_pct"}} 형태로 반환. 개별 티커 조회 실패는
+    건너뛰고 계속 진행하며, 전부 실패하면 None을 반환해서(다른 정량 데이터 조회 함수들과
+    동일하게) 정리 기능 전체가 죽지 않도록 함."""
     try:
         import yfinance as yf
     except ImportError:
@@ -1827,7 +1796,7 @@ def fetch_market_quant_data() -> Optional[dict]:
         return None
 
     result = {}
-    for name, ticker in MARKET_QUANT_TICKERS.items():
+    for name, ticker in tickers.items():
         try:
             hist = yf.Ticker(ticker).history(period="5d")
             if len(hist) < 2:
@@ -1836,7 +1805,7 @@ def fetch_market_quant_data() -> Optional[dict]:
             latest = float(hist["Close"].iloc[-1])
             prev = float(hist["Close"].iloc[-2])
             change_pct = (latest - prev) / prev * 100 if prev else 0.0
-            result[name] = {"value": latest, "change_pct": change_pct}
+            result[name] = {"value": latest, "prev_value": prev, "change_pct": change_pct}
         except Exception as e:
             log.info(f"{name}({ticker}) 시세 조회 실패, 건너뜀: {e}")
             continue
@@ -1847,293 +1816,330 @@ def fetch_market_quant_data() -> Optional[dict]:
     return result
 
 
-def format_quant_data_text(quant_data: dict) -> str:
-    """fetch_market_quant_data()의 결과를 LLM 프롬프트에 넣을 텍스트로 정리."""
-    return "\n".join(
-        f"- {name}: {v['value']:,.2f} (전일 대비 {v['change_pct']:+.2f}%)"
-        for name, v in quant_data.items()
-    )
+def fetch_market_quant_data() -> Optional[dict]:
+    """주식/변동성/환율/에너지 정량 데이터(MARKET_QUANT_TICKERS) 조회."""
+    return _fetch_yfinance_quant(MARKET_QUANT_TICKERS)
 
 
-def fetch_finnhub_earnings_calendar(from_date, to_date) -> list:
-    """Finnhub 실적 캘린더에서 from_date~to_date(포함) 사이의 미국 상장기업 실적 발표
-    일정/결과를 조회. 각 항목: {"symbol", "hour"(bmo/amc/dmh), "epsEstimate", "epsActual",
-    "revenueEstimate", "revenueActual"}. FINNHUB_API_KEY가 없거나 조회 실패 시 빈 리스트를
-    반환해서(다른 정량 데이터 조회 함수들과 동일하게) 정리 기능 전체가 죽지 않도록 함."""
-    if not FINNHUB_API_KEY:
-        return []
+def fetch_asia_quant_data() -> Optional[dict]:
+    """오후 정리 전용 아시아 지수(ASIA_QUANT_TICKERS) 조회."""
+    return _fetch_yfinance_quant(ASIA_QUANT_TICKERS)
+
+
+def fetch_fred_series_latest(series_id: str) -> Optional[dict]:
+    """FRED의 fredgraph.csv 공개 엔드포인트(API 키 불필요)에서 시계열의 최신 값과 그 직전
+    값을 조회. FRED는 휴장일 등 값이 없는 날을 '.'으로 표기하므로 걸러내고 실제 값이 있는
+    마지막 두 지점을 비교함. 실패해도 항상 None을 반환해서 정리 기능 전체가 죽지 않도록 함."""
     try:
         resp = requests.get(
-            "https://finnhub.io/api/v1/calendar/earnings",
-            params={"from": from_date.isoformat(), "to": to_date.isoformat(), "token": FINNHUB_API_KEY},
-            timeout=10,
+            f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}", timeout=10,
         )
         resp.raise_for_status()
-        return resp.json().get("earningsCalendar", []) or []
-    except Exception as e:
-        log.info(f"Finnhub 실적 캘린더 조회 실패, 건너뜀: {e}")
-        return []
-
-
-def build_us_earnings_forward_candidates(raw_calendar: list) -> list:
-    """미국 실적 발표(예정) 프롬프트에 넣을 후보 목록. Finnhub 원본에서 심볼/시각만 추출."""
-    seen = {}
-    for e in raw_calendar:
-        symbol = (e.get("symbol") or "").strip().upper()
-        hour = (e.get("hour") or "").strip().lower()
-        if not symbol or hour not in ("bmo", "amc"):
-            continue
-        seen[symbol] = {"symbol": symbol, "hour": hour}  # 같은 심볼 재등장 시 최신 것으로 덮어씀
-    return list(seen.values())
-
-
-def build_us_earnings_review_candidates(raw_calendar: list) -> list:
-    """미국 실적 리뷰(이미 발표됨) 프롬프트에 넣을 후보 목록. 실제 EPS 결과가 있는(=이미
-    발표된) 항목만 골라, 컨센서스 대비 상회/하회율로 호재/악재/중립을 코드에서 직접 판단함
-    (LLM의 그때그때 다른 판단에 맡기지 않기 위함 — 마이크론이 같은 실적을 두고 날마다
-    호재/악재가 뒤집혀서 나오던 문제의 근본 원인). 이미 최근에 리뷰됐던 티커는 제외."""
-    already_reviewed = recently_reviewed_symbols()
-    seen = {}
-    for e in raw_calendar:
-        symbol = (e.get("symbol") or "").strip().upper()
-        eps_actual = e.get("epsActual")
-        if not symbol or eps_actual is None or symbol in already_reviewed:
-            continue
-        eps_estimate = e.get("epsEstimate")
-        verdict = "중립"
-        surprise_pct = None
-        if eps_estimate not in (None, 0):
-            surprise_pct = (eps_actual - eps_estimate) / abs(eps_estimate) * 100
-            if surprise_pct >= 5:
-                verdict = "호재"
-            elif surprise_pct <= -5:
-                verdict = "악재"
-        seen[symbol] = {
-            "symbol": symbol, "verdict": verdict, "eps_actual": eps_actual,
-            "eps_estimate": eps_estimate, "surprise_pct": surprise_pct,
+        rows = [r.split(",") for r in resp.text.strip().split("\n")[1:] if r.strip()]
+        valid = [(d, float(v)) for d, v in rows if v not in (".", "")]
+        if len(valid) < 2:
+            return None
+        (prev_date, prev_value), (latest_date, latest_value) = valid[-2], valid[-1]
+        return {
+            "value": latest_value, "date": latest_date,
+            "prev_value": prev_value, "prev_date": prev_date,
+            "change_bp": (latest_value - prev_value) * 100,
         }
-    return list(seen.values())
+    except Exception as e:
+        log.info(f"FRED 시계열({series_id}) 조회 실패, 건너뜀: {e}")
+        return None
 
 
-def validate_us_earnings_blocks(
-    classified_blocks: list, forward_region: str, review_region: str,
-    us_earnings_forward: Optional[list], us_earnings_review: Optional[list],
-) -> list:
-    """classify_digest_blocks() 결과에서, 미국 실적 발표/리뷰 항목을 Finnhub 실측 데이터와
-    대조 검증함. LLM은 여전히 텔레그램 텍스트만 보고 자유롭게 회사를 골라 쓰지만(캘린더가
-    하루 1000건이 넘어 프롬프트에 통째로 넣을 수 없음), 그 결과 중 Finnhub가 확인해주지
-    못하는 항목(=할루시네이션이거나, 실제로는 오늘 발표 대상이 아니거나, 비상장 등)은 통째로
-    드롭하고, 확인되는 항목은 BMO/AMC·호재/악재/중립 값을 실제 데이터로 덮어써서(LLM의 추정을
-    신뢰하지 않고) 정확성을 보장함.
-    us_earnings_forward/us_earnings_review가 None이면(Finnhub 미설정 등) 검증 없이 그대로
-    통과시킴(기존 동작으로 폴백)."""
-    forward_by_symbol = (
-        {c["symbol"]: c for c in us_earnings_forward}
-        if forward_region == "US" and us_earnings_forward is not None else None
+def fetch_rates_quant_data() -> Optional[dict]:
+    """FRED_RATE_SERIES에 정의된 금리 시계열(명목/실질/BEI)을 전부 조회."""
+    result = {}
+    for name, series_id in FRED_RATE_SERIES.items():
+        data = fetch_fred_series_latest(series_id)
+        if data:
+            result[name] = data
+    return result or None
+
+
+def compute_crack_spread_321(quant_data: dict) -> Optional[dict]:
+    """WTI/RBOB/난방유 선물가로 미국 3-2-1 크랙 스프레드($/bbl)를 계산. RBOB·난방유는
+    $/gal 단위라 배럴당 환산(×42)이 필요함. 셋 중 하나라도 조회 실패했으면 None."""
+    wti = quant_data.get("WTI유")
+    rbob = quant_data.get("RBOB 가솔린(크랙 스프레드 계산용)")
+    heat = quant_data.get("난방유(크랙 스프레드 계산용)")
+    if not (wti and rbob and heat):
+        return None
+
+    def _crack(wti_v, rbob_v, heat_v):
+        return (2 * rbob_v * 42 + 1 * heat_v * 42 - 3 * wti_v) / 3
+
+    value = _crack(wti["value"], rbob["value"], heat["value"])
+    prev_value = _crack(wti["prev_value"], rbob["prev_value"], heat["prev_value"])
+    return {"value": value, "prev_value": prev_value, "change": value - prev_value}
+
+
+_CRACK_SPREAD_INPUT_NAMES = ("RBOB 가솔린(크랙 스프레드 계산용)", "난방유(크랙 스프레드 계산용)")
+
+
+def format_quant_data_text(quant_data: dict) -> str:
+    """fetch_market_quant_data()/fetch_asia_quant_data() 결과를 LLM 프롬프트용 텍스트로 정리.
+    크랙 스프레드 계산 전용 원자재(RBOB/난방유)는 최종 텍스트에서 제외(계산된 크랙 스프레드
+    값만 별도로 노출됨)."""
+    lines = [
+        f"- {name}: {v['value']:,.2f} (전일 대비 {v['change_pct']:+.2f}%)"
+        for name, v in quant_data.items() if name not in _CRACK_SPREAD_INPUT_NAMES
+    ]
+    crack = compute_crack_spread_321(quant_data)
+    if crack:
+        lines.append(f"- 미국 3-2-1 크랙 스프레드(정제마진): ${crack['value']:.2f}/bbl (전일 대비 {crack['change']:+.2f})")
+    return "\n".join(lines)
+
+
+def format_rates_data_text(rates_data: dict) -> str:
+    """fetch_rates_quant_data() 결과를 LLM 프롬프트용 텍스트로 정리. bp 단위로 표기."""
+    return "\n".join(
+        f"- {name}: {v['value']:.2f}% (기준일 {v['date']}, 전일 대비 {v['change_bp']:+.0f}bp)"
+        for name, v in rates_data.items()
     )
-    review_by_symbol = (
-        {c["symbol"]: c for c in us_earnings_review}
-        if review_region == "US" and us_earnings_review is not None else None
-    )
-    if forward_by_symbol is None and review_by_symbol is None:
-        return classified_blocks
 
-    validated = []
-    for b in classified_blocks:
-        if b.get("type") == "earnings" and forward_by_symbol is not None:
-            match = forward_by_symbol.get((b.get("ticker") or "").strip().upper())
-            if not match:
-                log.warning(f"[정리] Finnhub 미확인 실적 발표 항목 드롭: {b.get('company')} ({b.get('ticker')})")
-                continue
-            b["detail"] = "장 시작 전" if match["hour"] == "bmo" else "장 마감 후"
-        elif b.get("type") == "review" and review_by_symbol is not None:
-            match = review_by_symbol.get((b.get("ticker") or "").strip().upper())
-            if not match:
-                log.warning(f"[정리] Finnhub 미확인 실적 리뷰 항목 드롭: {b.get('company')} ({b.get('ticker')})")
-                continue
-            b["verdict"] = match["verdict"]
-        validated.append(b)
 
-    # 섹션의 모든 항목이 검증 과정에서 드롭됐으면, 남겨진 섹션 제목(고아 타이틀)도 제거
-    result = []
-    for i, b in enumerate(validated):
-        if b.get("type") == "earnings_title":
-            if i + 1 >= len(validated) or validated[i + 1].get("type") != "earnings":
-                continue
-        elif b.get("type") == "review_title":
-            if i + 1 >= len(validated) or validated[i + 1].get("type") != "review":
-                continue
-        result.append(b)
-    return result
+DAILY_DIGEST_ROLE_INSTRUCTION = (
+    "너는 글로벌 매크로·주식·원자재를 함께 보는 기관투자자용 Daily Market Strategist야. 이 "
+    "브리핑의 목적은 '2027년 에너지가 오를 것이라는 주장을 매일 강화하는 것'이 아니라, 2027년 "
+    "에너지 강세 가설이 실제 원유·가스·전력·재고·금리·기업 데이터에 의해 강화되고 있는지 또는 "
+    "약화되고 있는지를 매일 객관적으로 검증하는 것이야. 단순 뉴스 요약이 아니라 ①금리(명목/실질/"
+    "기대인플레이션) ②에너지(원유/정제마진/천연가스/LNG/전력) ③AI·데이터센터 전력수요 ④지정학 "
+    "⑤인플레이션(헤드라인 및 2차 전이) ⑥글로벌 자금흐름 및 자산 간 로테이션을 하나의 연결된 "
+    "프레임으로 해석해.\n\n"
+    "[핵심 분석 프레임]\n"
+    "A. 금리축: 경기/고용/물가 → Fed 및 글로벌 중앙은행 → 미국 국채금리 → 달러 → 성장주/가치주/"
+    "중소형주 → 글로벌 증시. 미국 10년 명목금리는 10년 TIPS 실질금리와 10년 BEI(기대인플레이션)"
+    "로 근사 분해해서, 오늘 10년물 금리 변화가 BEI 주도인지 실질금리 주도인지를 반드시 구분해줘. "
+    "단, BEI는 순수한 기대인플레이션 자체가 아니라 인플레이션 위험프리미엄·유동성 등에도 영향받을"
+    " 수 있다는 점을 감안해서 해석해.\n"
+    "B. 에너지축: 원유 → 정제마진 → 천연가스/LNG → 전력 → 생산자물가/소비자물가 → 기대인플레이션"
+    "(BEI) → 장기금리 → 기업 원가·마진 → 산업별 실적·주가. 에너지 가격 변화를 절대 '유가가 올랐다"
+    "/내렸다'로 끝내지 말고 이 연쇄 전체로 해석해. 예시 패턴: 유가↑+10Y↑(BEI주도)→인플레 우려·"
+    "가치주 상대강세 점검, 유가↑+10Y↑(실질금리주도)→긴축우려·성장주 밸류에이션 압박 점검, 유가↑"
+    "+10Y↓→인플레보다 리스크오프/경기둔화 우려 점검, 유가↑+정제마진↓→원재료만 상승(수요 부진), "
+    "유가↑+정제마진↑→공급제약+수요 동시 타이트, TTF↑+유럽주↓+EUR↓→유럽 에너지쇼크 점검, AI "
+    "CAPEX↑+전력·가스·원전주↑→AI투자가 반도체를 넘어 에너지 인프라로 확산되는지 확인. 금리축과 "
+    "에너지축이 실제로 서로 연결되는지 매일 확인하되, 연결이 뚜렷하지 않으면 그렇다고 사실대로 "
+    "써(억지로 인과관계를 만들지 마).\n\n"
+    "[에너지 관찰 지표]\n"
+    "Brent, WTI, Henry Hub, 유럽 TTF, JKM LNG(의미 있는 변화가 있을 때만), 미국 원유·천연가스 "
+    "재고, EU 가스 저장률, 정제마진(가능하면 미국 3-2-1 크랙 스프레드로 통일 — 다른 기준을 쓰면 "
+    "반드시 명시), OPEC+ 생산 및 여유생산능력, 미국 원유·가스 생산, 중동·러시아 공급 차질, LNG "
+    "수출입 및 주요 수출시설 가동, 해상운임/VLCC(공급망 이슈 발생 시), 미국 전력수요/발전원 변화"
+    "(AI·데이터센터 이슈 발생 시). 숫자를 무조건 나열하지 말고, 전일 대비 또는 최근 추세 대비 "
+    "'시장 해석을 바꿀 만큼 의미 있게 움직인 변수'만 본문에 포함해.\n\n"
+    "[2027 에너지 구조적 관찰 프레임 — 확정된 전망이 아니라 매일 검증/반박할 투자 가설]\n"
+    "1) 원유: 과거 CapEx 부족→신규 공급 제한 가능성 + 낮은 재고 + 지정학 리스크 → 공급부족 "
+    "가능성. 검증 지표: 미국/OECD 원유재고, OPEC+ 생산·spare capacity, 미국 생산, Rig Count, "
+    "E&P CapEx, Brent 선물곡선, 정제마진.\n"
+    "2) 천연가스: 유전투자 부족→저비용 수반가스 공급 제한 가능성 + 미국 LNG 수출 증가·발전용 "
+    "가스수요 증가·글로벌 LNG 수요 → Henry Hub 타이트닝 가능성. 검증 지표: Henry Hub, 미국 "
+    "재고·생산량, LNG Feedgas·수출능력, 발전용 가스수요, 날씨/HDD·CDD.\n"
+    "3) 유럽: 가뭄/강수부족→수력발전 감소, 하천 수위·수온 문제→원전 냉각 제약→원전 발전량 감소"
+    " 가능성→가스발전 수요 증가→TTF 상승 가능성. 날씨+수력+원전+LNG수입+가스저장률을 함께 봐.\n"
+    "4) AI/데이터센터: AI CAPEX 증가→데이터센터 증설→전력수요 증가→천연가스 발전/원전/재생에너지"
+    "/가스터빈/전력망/변압기 수요 증가 가능성. 'AI→반도체'에서 끝내지 말고 'AI→데이터센터→전력→"
+    "천연가스/원전/전력망'까지 반드시 연결해.\n"
+    "5) 2차 인플레이션: 천연가스↑→암모니아/질소비료 원가↑, 원유·가스↑→황/인산계 비료 원가↑, "
+    "비료↑→곡물 생산비↑→식품 인플레이션. 이 연결고리가 실제 데이터(천연가스/비료/밀/옥수수/대두/"
+    "해상운임)에 나타나는지 확인.\n\n"
+    "[중요: 2027 에너지 가설 반증 원칙]\n"
+    "가설을 지지하는 뉴스·데이터만 선택적으로 쓰지 마. 가설을 약화시키는 데이터(미국 원유·가스 "
+    "생산 예상보다 빠른 증가, OPEC+ 증산 및 spare capacity 회복, 미국/OECD 원유재고 증가, 미국 "
+    "천연가스 재고 증가, LNG 신규 공급 예상보다 빠른 확대, 유럽 가스저장률 상승, 온화한 겨울, "
+    "산업용 에너지 수요 둔화, 중국·글로벌 경기둔화, 정제마진 급락, 선물곡선 Contango 전환, 에너지"
+    " 기업 CapEx 증가)도 동일한 비중으로 확인하고, 나타나면 '2027 에너지 강세 가설을 약화시키는 "
+    "신호'라고 명확히 써. 반대되는 데이터를 억지로 강세 논리로 해석하지 마.\n\n"
+)
+
+DAILY_DIGEST_WRITING_PRINCIPLES = (
+    "[작성 원칙]\n"
+    "1) 분량: 전체 공백 포함 약 1,200~1,800자를 목표로 해. 조건부 섹션은 오늘 이슈가 없으면 "
+    "과감히 생략해. 분량 초과 시 삭제 우선순위: 핵심 이슈 → 시장 온도계 → Energy Pulse → 금리×"
+    "에너지 연결 → 한국장/미장 체크포인트 순으로 보존하고, 조건부 섹션·부차 설명부터 삭제해. "
+    "핵심 이슈는 최대 4개, Energy Pulse에서 다루는 핵심 이슈는 최대 3개로 제한해.\n"
+    "2) 톤: 기관투자자 데스크 노트처럼 군더더기 없이 간결하게 써. '상당히/굉장히/엄청난' 같은 "
+    "과도한 수식어는 쓰지 마.\n"
+    "3) 기준시점: 가격·지표는 기준 시점과 전일 대비 변화율 또는 bp를 명시해. 종가 데이터와 "
+    "실시간 데이터를 혼용하면 반드시 구분해줘(예: 미국장 종가 기준 / 08:10 KST 현재 / 최신 주간"
+    " EIA 기준). 원유재고·가스재고·EU 가스저장률처럼 업데이트 주기가 느린 데이터를 당일 실시간"
+    "처럼 표현하지 마.\n"
+    "4) 사실과 가설 분리: '유럽 전력이 부족하다'처럼 단정하지 말고 '가뭄으로 수력·원전 발전이 "
+    "제약될 경우 가스발전 의존도가 높아질 가능성이 있다'처럼 조건부로 써. 2027 에너지 강세는 "
+    "확정된 전망이 아니라 계속 검증할 투자 가설로 취급해.\n"
+    "5) 출처: 아래 [오늘의 정보 모음]의 텔레그램/리서치 자료를 우선 참고하되, 그 자료의 '주장'과"
+    " '현재 실제 시장 데이터'(아래 정량 데이터)를 구분해. 특정 증권사·애널리스트 전망을 시장 "
+    "컨센서스처럼 표현하지 마. 출처가 불분명한 수치는 쓰지 마.\n"
+    "6) 원유와 가스 분리: Oil은 재고/OPEC+/미국생산/중동/러시아/정제마진/선물곡선, Gas는 날씨/"
+    "재고/LNG/발전수요/유럽 수력·원전/LNG 시설가동률로 각각 분석하고, 가격 변화가 공급쇼크인지 "
+    "수요변화인지 날씨인지 달러·금리 등 금융요인인지 구분해.\n"
+    "7) 자금흐름과 가격 로테이션 구분: ETF Flow·포지셔닝·외국인/기관 수급 등 실제 Flow 데이터가"
+    " 없으면 '자금이 유입/이탈됐다'고 단정하지 말고 '상대적 강세', '로테이션 양상', '선호 이동 "
+    "가능성' 등으로 표현해.\n"
+    "8) 금리 분해: 10년물 변화는 BEI 주도인지 실질금리 주도인지 먼저 확인하고, BEI를 순수 "
+    "기대인플레이션과 완전히 동일시하지 마.\n"
+    "9) 반증 원칙: 2027 에너지 강세 가설에 불리한 데이터도 같은 비중으로 다루고, 가설이 약해지고"
+    " 있으면 명확히 그렇게 써.\n"
+    "10) 과해석 금지: 상관관계를 항상 인과관계로 단정하지 말고, 근거가 부족하면 '뚜렷한 연결은 "
+    "아직 확인되지 않는다'라고 써.\n"
+    "11) 방향성이 모호하면 억지로 Bullish/Bearish 관점을 만들지 말고 '방향성 탐색 구간', '혼재된"
+    " 신호', '확인 필요' 등으로 표현해.\n"
+    "12) 서식: 이모지는 지정된 섹션 제목에서만 사용하고, 불필요한 이모지나 감탄 표현은 쓰지 마. "
+    "각 섹션에서 실제로 다룰 이슈/조건이 없으면 그 섹션은(필수 섹션이 아닌 한) 제목째 통째로 "
+    "생략해.\n\n"
+)
+
+DAILY_DIGEST_FORMAT_GUARD = (
+    "라벨(예: '핵심 이슈:', '인사이트:')은 붙이지 말고 자연스러운 글로 작성해(단, 이슈별 인사이트"
+    " 줄 앞의 '💡 시장 영향: '과 지정된 섹션 제목은 표기 그대로 유지). 섹션 제목(이모지 포함)은 "
+    "지정된 표기를 정확히 그대로 사용하고, 섹션 사이는 빈 줄 1개로 구분해줘.\n"
+    "중요: 마크다운 굵게 표시(**텍스트**)나 마크다운 코드펜스(```)를 절대 쓰지 마. 이 결과는 "
+    "우리 쪽에서 이미 <blockquote> 태그로 감싸서 인용블럭 형태로 전송하기 때문에, 네가 마크다운 "
+    "기호나 코드펜스를 또 쓰면 별표(**)나 백틱(```)이 그대로 글자로 노출돼서 지저분해 보여. "
+    "순수 텍스트로만, 백틱이나 별표 없이 작성해.\n"
+    "중복되거나 사소한 내용은 과감히 생략하고, 정말 중요한 것 위주로 압축해.\n\n"
+)
+
+DAILY_DIGEST_MORNING_PART1 = (
+    "[PART 1 : 밤사이 핵심 이슈]\n"
+    "한국장 개장 전 기준이야. 전일 미국장 마감과 밤사이 매크로·에너지 변화를 바탕으로, 오늘 "
+    "한국장에 영향을 줄 핵심 이슈 3~4개를 골라줘. 각 이슈마다 아래 형식으로:\n"
+    "   - 핵심 뉴스 요약 1~2문장 (글머리 기호 '-' 사용)\n"
+    "   그 바로 아래 줄에 공백 4칸(스페이스 4개)으로 들여쓴 뒤 '💡 시장 영향: '으로 시작하는 "
+    "문장 1개 — 단순 뉴스 설명이 아니라 왜 금융시장에 중요한지. 가능하면 '지정학→에너지→"
+    "인플레이션→BEI/실질금리→주식 밸류에이션' 또는 'AI→데이터센터→전력→천연가스/원전/전력망' "
+    "연결고리를 활용하되, 중요도가 낮거나 연결이 약하면 억지로 에너지와 연결하지 마. 확실한 "
+    "연관성이 없으면 인사이트 줄을 생략해도 돼.\n"
+    "   이슈 묶음 사이는 빈 줄 1개로 구분해줘.\n"
+    "PART 1 제목 줄은 정확히 'PART 1: 밤사이 핵심 이슈'라고 써.\n\n"
+)
+
+DAILY_DIGEST_MORNING_PART2 = (
+    "[PART 2 : 모닝 시장 구조 분석]\n"
+    "PART 1 마지막 이슈 뒤에 빈 줄 2개를 두고, 'PART 2: 모닝 시장 구조 분석'이라는 제목 줄을 "
+    "쓴 뒤 아래 섹션들을 순서대로 작성해. 반드시 아래에 제공되는 정량 데이터의 실제 수치를 "
+    "인용해서 서술하고(예: '나스닥 100이 X.XX% 상승해 YY,YYY 부근'처럼), 수치 없이 뭉뚱그린 "
+    "서술은 하지 마. 정량 데이터가 없는 항목만 텔레그램 텍스트로 서술해.\n\n"
+    "🌡️ 시장 온도계 (필수)\n"
+    "미국장 마감 및 밤사이 지표를 종합해. S&P500/나스닥100/러셀2000/VIX/미국 10년물/10년 BEI/"
+    "10년 실질금리/2년물/DXY/원달러를 반드시 포함하고, 오늘 시장을 Risk-on/중립/경계/Risk-off "
+    "중 하나로 규정해. 단, 한 지표만으로 판단하지 말고 지수 방향·VIX·달러·명목/실질금리·중소형주"
+    " 상대수익률을 종합해서 판단해. 그리고 '오늘 시장을 실제로 지배한 핵심 변수'가 무엇인지 "
+    "반드시 짚어줘.\n\n"
+    "⚡ Energy Pulse (필수)\n"
+    "오늘 에너지 시장에서 가장 중요한 변화 2~3개만 선정해서 [가격 변화]→[원인]→[공급/수요 "
+    "요인]→[재고/정제마진/생산 확인]→[인플레이션/금리 영향]→[주식시장 영향] 순으로 분석해. "
+    "Oil(재고/OPEC+/중동·러시아/미국생산/정제마진/선물곡선)과 Gas(날씨/재고/LNG/발전수요/유럽 "
+    "수력·원전/LNG시설)는 반드시 분리해서 써. 마지막 줄에 '📌 오늘 에너지 시장의 핵심: '으로 "
+    "시작해서 오늘 가격을 움직인 가장 중요한 변수가 공급/수요/날씨/지정학/달러·금리 중 무엇인지"
+    " 한 문장으로 정리해.\n\n"
+    "🔗 금리 × 에너지 연결 (필수)\n"
+    "유가-미국10Y, 유가-BEI, 유가-실질금리, TTF-유럽금리, 에너지-달러, 에너지-성장주, 에너지-"
+    "경기민감주 관계를 확인하고, 특히 미국 10년물 움직임이 BEI 주도인지 실질금리 주도인지 "
+    "구분해줘. 실제로 연결되지 않으면 '오늘은 에너지와 금리 사이의 뚜렷한 연결은 관찰되지 "
+    "않는다'라고 명시해(억지로 인과관계를 만들지 마).\n\n"
+    "⚡ AI · 전력 · 에너지 Chain (조건부 — 빅테크/하이퍼스케일러 데이터센터 CAPEX, 전력수요 "
+    "전망, 발전용 천연가스, 원전, 가스터빈, 전력망, 변압기, 전력 유틸리티, PPA 관련 이슈가 "
+    "실제로 있는 날에만 작성. 없으면 제목째 완전히 생략)\n\n"
+    "🔀 시장 괴리 체크 (조건부 — 유가↑/에너지주↓, 금리↑/나스닥↑, DXY↑/EM↑, TTF↑/유럽산업주↑, "
+    "실질금리↑/금↑ 처럼 통상적인 Cross-Asset 관계가 깨진 날에만, 실적/포지셔닝/개별기업뉴스/"
+    "경기전망/정책/기술적 요인 등으로 이유를 설명하며 작성. 특이점 없으면 완전히 생략)\n\n"
+    "🌾 2차 인플레이션 Watch (조건부 — 천연가스/비료/밀/옥수수/대두/해상운임 중 실제 의미 있는 "
+    "움직임이 있을 때만, 에너지→비료→곡물→식품물가 전이 징후를 분석. 단순히 에너지 가격이 "
+    "올랐다는 이유만으로 쓰지 마. 없으면 완전히 생략)\n\n"
+    "🌐 글로벌 로테이션 & 오늘 한국장 체크포인트 (필수, 마지막 섹션)\n"
+    "Mega Cap↔Small Cap, Growth↔Value, Tech↔Energy, Cyclical↔Defensive, 미국↔유럽↔아시아 "
+    "로테이션 양상을 관찰하되, 가격 상대수익률과 실제 자금흐름(ETF Flow/포지셔닝/수급)을 엄격히"
+    " 구분해 — 실제 Flow 데이터가 없으면 '자금 유입/이탈'이라 단정하지 말고 '상대적 강세', "
+    "'로테이션 양상', '선호 이동 가능성'으로 표현해. 미국 시장의 상대강도 → 원/달러 → 외국인 "
+    "수급 가능성 → 오늘 국내 핵심 섹터(반도체/정유/화학/조선/전력기기/원전/방산 중 당일 연결성"
+    " 높은 것만 압축) 순으로 연결해서 마무리해.\n\n"
+)
+
+DAILY_DIGEST_EVENING_PART1 = (
+    "[PART 1 : 아시아 장중 & 오후 핵심 이슈]\n"
+    "15:30 KST 한국장 마감 직후 기준이야. 오전 브리핑을 반복하지 말고, 아시아 장중 반응 + 오전"
+    " 전망 복기 + 유럽 개장 전후 흐름 + 오늘 밤 미국장 시나리오에 집중해. 장중 아시아/중국 "
+    "매크로, 지정학 속보, 산업 뉴스, 에너지 가격 변화 중 중요한 것만 3~4개 골라줘. 각 이슈마다"
+    " 아래 형식으로:\n"
+    "   - 핵심 뉴스 요약 1~2문장 (글머리 기호 '-' 사용)\n"
+    "   그 바로 아래 줄에 공백 4칸(스페이스 4개)으로 들여쓴 뒤 '💡 시장 영향: '으로 시작하는 "
+    "문장 1개. 확실한 연관성이 없으면 인사이트 줄을 생략해도 돼.\n"
+    "   이슈 묶음 사이는 빈 줄 1개로 구분해줘.\n"
+    "PART 1 제목 줄은 정확히 'PART 1: 아시아 장중 & 오후 핵심 이슈'라고 써.\n\n"
+)
+
+DAILY_DIGEST_EVENING_PART2 = (
+    "[PART 2 : 애프터눈 시장 구조 & 미장 프리뷰]\n"
+    "PART 1 마지막 이슈 뒤에 빈 줄 2개를 두고, 'PART 2: 애프터눈 시장 구조 & 미장 프리뷰'라는 "
+    "제목 줄을 쓴 뒤 아래 섹션들을 순서대로 작성해. 반드시 정량 데이터의 실제 수치를 인용해서 "
+    "서술해.\n\n"
+    "🌡️ 아시아 시장 온도계 & 오전 뷰 복기 (필수)\n"
+    "코스피/코스닥/일본/중국/홍콩, 원/달러, 외국인·기관 수급(실제 Flow 데이터가 없으면 상대강세"
+    "로만 표현)을 종합해. 이어서 같은 섹션 안에 '오전 전망 검증: '으로 시작하는 문장을 추가해서"
+    " 오전 브리핑에서 예상한 금리·에너지발 한국장 반응이 실제로 나타났는지 1~2문장으로 복기하고"
+    "(예상과 달랐다면 무엇이 예상보다 강한 변수였는지도 설명), 오전 브리핑 내용을 알 수 없으면 "
+    "이 문장은 생략해.\n\n"
+    "⚡ Energy & Europe Pulse (필수)\n"
+    "아시아 시간대 Brent/WTI/Henry Hub/TTF/DXY 변화를 [가격 변화]→[원인]→[공급/수요 요인]→"
+    "[재고/정제마진/생산 확인]→[인플레이션/금리 영향]→[주식시장 영향] 순으로 분석해(Oil/Gas "
+    "반드시 분리). 유럽 현물시장이 아직 개장 전이면 유럽 지수선물/TTF/유로/유럽 국채금리를 "
+    "기준으로, 개장 후라면 유럽 현물지수·섹터 반응을 추가해(서머타임 여부를 감안해 실제 개장 "
+    "여부를 판단해). 마지막 줄에 '📌 오늘 에너지 시장의 핵심: '으로 시작하는 한 문장을 추가해.\n\n"
+    "🔗 장중 금리 × 에너지 × 환율 연결 (필수)\n"
+    "미국 국채금리, BEI/실질금리, DXY, 원/달러, Brent/TTF의 장중 동조 또는 괴리를 분석하고, "
+    "미국 10년물 움직임이 BEI 주도인지 실질금리 주도인지 구분해. 뚜렷한 연결이 없으면 그렇다고"
+    " 명시해.\n\n"
+    "⚡ AI · 전력 · 에너지 Chain (조건부 — 실제 이슈가 있는 날에만. 없으면 완전히 생략)\n\n"
+    "🔀 시장 괴리 체크 (조건부 — Cross-Asset 관계가 깨진 날에만. 없으면 완전히 생략)\n\n"
+    "🌾 2차 인플레이션 Watch (조건부 — 실제 의미 있는 움직임이 있을 때만. 없으면 완전히 생략)\n\n"
+    "🌙 오늘 밤 미장 핵심 관전 포인트 (필수, 마지막 섹션)\n"
+    "CPI/PCE/고용/JOLTS/Fed 발언/국채입찰/EIA 원유재고/EIA 가스재고/OPEC+/중동 뉴스/기업실적 중"
+    " 2~4개만 선정해. 각 이벤트마다 ①시장 컨센서스 ②이전치 ③예상 상회 시 ④예상 하회 시를 "
+    "기준으로 에너지→BEI→실질금리→달러→주식 반응 시나리오를 간결하게 제시해. 시장 컨센서스를 "
+    "확인하지 못했으면 임의의 수치 기준을 만들지 말고 방향성 시나리오만 써. 이 섹션 제목 줄은 "
+    "정확히 '🌙 오늘 밤 미장 핵심 관전 포인트'라고 써(화살표는 우리 쪽에서 자동으로 붙이니 "
+    "너는 붙이지 마).\n\n"
+)
 
 
 def generate_daily_digest(
     entries_text: str, count: int, quant_data_text: Optional[str] = None, digest_time: str = "evening",
 ) -> Optional[str]:
-    """하루 동안 쌓인 정성적 정보(텔레그램 메시지)와 정량적 시장 데이터(yfinance)를 결합해서,
-    핵심 이슈 정리 + 4가지 전략적 분석 관점으로 된 정리를 생성.
-    digest_time: "morning"(8시, 어젯밤 미국장이 막 끝나고 한국장이 곧 열림) 또는
-    "evening"(18시, 오늘 한국장이 막 끝나고 미국장이 곧 열림).
-    이 값에 따라 '📅 오늘의 실적 발표'(지금 곧 열릴 시장의 예정된 실적)와
-    '📊 실적 리뷰'(방금 닫힌 시장의 이미 나온 실적, 호재/악재/중립 판단)의 대상 국가가
-    각각 자동으로 정해짐:
-      - morning: 실적 발표 → 한국(오늘 개장 예정), 실적 리뷰 → 미국(어젯밤 마감)
-      - evening: 실적 발표 → 미국(오늘 밤 개장 예정), 실적 리뷰 → 한국(오늘 마감)
-    미국 쪽 실적 발표/리뷰는 이 함수 안에서는 기존처럼 LLM이 텔레그램 텍스트만으로 추정하고,
-    _run_digest에서 결과를 Finnhub 실측 데이터로 사후 검증(확인 안 되는 항목 드롭, BMO/AMC·
-    호재/악재/중립 값 실제 데이터로 덮어쓰기)함 — Finnhub 캘린더가 하루 1000건이 넘어 후보
-    목록을 프롬프트에 통째로 넣을 수 없어서 채택한 방식(validate_us_earnings_blocks 참고)."""
-    forward_region = "KR" if digest_time == "morning" else "US"
-    review_region = "US" if digest_time == "morning" else "KR"
+    """하루 동안 쌓인 정성적 정보(텔레그램 메시지)와 정량적 시장 데이터(주식/VIX/환율/에너지는
+    yfinance, 금리(명목/실질/BEI)는 FRED)를 결합해서, 금리축·에너지축을 하나의 프레임으로 엮는
+    'Daily Market Strategist' 브리핑을 생성.
+    digest_time: "morning"(8시, 어젯밤 미국장이 막 끝나고 한국장이 곧 열림, 밤사이 이슈 중심) 또는
+    "evening"(18시, 오늘 한국장이 막 끝나고 미국장이 곧 열림, 아시아 장중 반응 + 오전 전망 복기 +
+    미장 프리뷰 중심)."""
     quant_section = (
-        f"[오늘의 정량 시장 데이터 (yfinance 기준, 최신 종가/전일 대비)]\n{quant_data_text}\n\n"
+        f"[오늘의 정량 데이터]\n{quant_data_text}\n\n"
         if quant_data_text
-        else "[오늘의 정량 시장 데이터]\n(조회 실패 또는 미제공 — 아래 텔레그램 텍스트 정보만으로 분석)\n\n"
+        else "[오늘의 정량 데이터]\n(조회 실패 또는 미제공 — 아래 텔레그램 텍스트 정보만으로 분석)\n\n"
     )
-
-    # ── [오늘의 실적 발표] 섹션 ──
-    if forward_region == "US":
-        earnings_forward_block = (
-            "[오늘의 실적 발표 지시사항 — 선택 사항]\n"
-            "PART 2의 4개 섹션을 모두 작성한 다음, 빈 줄 2개를 두고 아래 섹션을 추가해줘.\n"
-            "매우 중요한 제한 조건: 이 섹션은 반드시 '미국 증권거래소(NYSE, NASDAQ)에 상장된 "
-            "기업'만 포함해야 해. 한국거래소(KRX)에 상장된 한국 기업은 절대 넣지 마.\n"
-            "또한, 이미 발표가 끝난(과거형으로 서술된) 실적은 절대 넣지 마 — '오늘 밤' 또는 "
-            "'내일' 등 아직 발표 전으로 명확히 언급된 기업만 포함해.\n"
-            "위 조건을 만족하는 기업이 하나라도 있으면, 아래 형식으로 정리해줘:\n"
-            "📅 오늘의 실적 발표\n"
-            "그 아래 각 기업마다 한 줄씩: - 회사명 (티커) - BMO 또는 - 회사명 (티커) - AMC\n"
-            "BMO는 장 시작 전 발표, AMC는 장 마감 후 발표를 뜻해. 텔레그램 텍스트에 시점이 "
-            "명시돼 있으면 그대로 따르고, 명시가 없으면 그 회사의 일반적으로 알려진 통상적인 "
-            "발표 관행을 기준으로 BMO 또는 AMC 중 하나를 추정해서 붙여줘(정말 알 수 없으면 "
-            "AMC로 표기). 각 줄은 정확히 '- 회사명 (티커) - BMO' 또는 '- 회사명 (티커) - AMC' "
-            "형식만 지켜줘(다른 설명 붙이지 마, 시각은 우리 쪽에서 별도로 계산해서 붙일 거야).\n"
-            "조건을 만족하는 기업이 하나도 없으면 이 섹션(제목 포함) 전체를 통째로 생략해.\n\n"
-        )
-    else:
-        earnings_forward_block = (
-            "[오늘의 실적 발표 지시사항 — 선택 사항]\n"
-            "PART 2의 4개 섹션을 모두 작성한 다음, 빈 줄 2개를 두고 아래 섹션을 추가해줘.\n"
-            "매우 중요한 제한 조건: 이 섹션은 반드시 '한국거래소(KRX, 코스피/코스닥)에 상장된 "
-            "한국 기업'만 포함해야 해. 미국 증권거래소 상장 기업은 절대 넣지 마.\n"
-            "또한, 이미 발표가 끝난(과거형으로 서술된, 예: '실적을 발표했다') 실적은 절대 넣지 "
-            "마 — '오늘' 또는 '금일' 등 아직 발표 전으로 명확히 언급된 기업만 포함해.\n"
-            "위 조건을 만족하는 기업이 하나라도 있으면, 아래 형식으로 정리해줘:\n"
-            "📅 오늘의 실적 발표\n"
-            "그 아래 각 기업마다 한 줄씩, 정확히 이 형식만 써: - 회사명 (종목코드)\n"
-            "미국 기업과 달리 한국 기업은 장 시작 전/마감 후 같은 고정된 발표 관행이 없으니, "
-            "시각이나 BMO/AMC 같은 표시는 절대 붙이지 마. 회사명과 종목코드만 정확히 적어줘.\n"
-            "조건을 만족하는 기업이 하나도 없으면 이 섹션(제목 포함) 전체를 통째로 생략해.\n\n"
-        )
-
-    # ── [실적 리뷰] 섹션 ──
-    if review_region == "US":
-        earnings_review_block = (
-            "[실적 리뷰 지시사항 — 선택 사항]\n"
-            "PART 2의 4개 섹션과 위 실적 발표 섹션을 모두 작성한 다음, 빈 줄 2개를 두고 "
-            "아래 섹션을 추가해줘.\n"
-            "매우 중요한 제한 조건: 어젯밤(미국 장 마감 기준) 실적을 발표한 '미국 증권거래소"
-            "(NYSE, NASDAQ)에 상장된 기업'만 다뤄야 해. 한국거래소(KRX) 상장 기업은 이 "
-            "섹션에 절대 넣지 마.\n"
-            "가장 중요한 조건: 텔레그램 텍스트에 그 기업의 실제 실적 발표 내용(매출, EPS, "
-            "가이던스, 컨센서스 대비 상회/하회 등)이 구체적으로 언급돼 있어야만 포함해. 단순히 "
-            "그 기업이 언급됐다는 이유만으로 포함하지 마. 확신이 없으면 생략해.\n"
-            "각 기업마다, 그 실적이 시장에 호재였는지 악재였는지 중립이었는지 판단해줘. 판단 "
-            "기준: 컨센서스(시장 예상치) 대비 매출·EPS가 상회/하회했는지, 어닝 서프라이즈 "
-            "여부, 가이던스가 상향/하향됐는지, 실제 주가 반응이 어땠는지를 종합해서 판단해.\n"
-            "위 조건을 만족하는 기업이 하나라도 있으면, 아래 형식으로 정리해줘:\n"
-            "📊 어젯밤 미국 실적 리뷰\n"
-            "그 아래 각 기업마다 한 줄씩, 정확히 이 형식만 써: "
-            "- 회사명 (티커) - 호재/악재/중립 - 한 줄 이유\n"
-            "'호재', '악재', '중립' 중 정확히 하나만 써야 해(다른 표현 쓰지 마). 이유는 "
-            "간결하게 한 문장으로.\n"
-            "조건을 만족하는 기업이 하나도 없으면 이 섹션(제목 포함) 전체를 통째로 생략해.\n\n"
-        )
-    else:
-        earnings_review_block = (
-            "[실적 리뷰 지시사항 — 선택 사항]\n"
-            "PART 2의 4개 섹션과 위 실적 발표 섹션을 모두 작성한 다음, 빈 줄 2개를 두고 "
-            "아래 섹션을 추가해줘.\n"
-            "매우 중요한 제한 조건: 오늘 실적을 발표한 '한국거래소(KRX, 코스피/코스닥)에 "
-            "상장된 한국 기업'만 다뤄야 해. 미국 증권거래소 상장 기업은 이 섹션에 절대 넣지 마.\n"
-            "가장 중요한 조건: 텔레그램 텍스트에 그 기업의 실제 실적 발표 내용(매출, 영업이익, "
-            "컨센서스 대비 상회/하회 등)이 구체적으로 언급돼 있어야만 포함해. 단순히 그 기업이 "
-            "언급됐다는 이유만으로(주가 동향, 일반 뉴스 등 실적과 무관한 맥락) 포함하지 마 — "
-            "삼성전자, SK하이닉스처럼 매일 자주 언급되는 대형주라도 예외 없이 이 조건을 지켜. "
-            "확신이 없으면 생략해.\n"
-            "각 기업마다, 그 실적이 시장에 호재였는지 악재였는지 중립이었는지 판단해줘. 판단 "
-            "기준: 컨센서스(시장 예상치) 대비 매출·영업이익이 상회/하회했는지, 어닝 서프라이즈 "
-            "여부, 실제 주가 반응이 어땠는지를 종합해서 판단해.\n"
-            "위 조건을 만족하는 기업이 하나라도 있으면, 아래 형식으로 정리해줘:\n"
-            "📊 오늘 한국 실적 리뷰\n"
-            "그 아래 각 기업마다 한 줄씩, 정확히 이 형식만 써: "
-            "- 회사명 (종목코드) - 호재/악재/중립 - 한 줄 이유\n"
-            "'호재', '악재', '중립' 중 정확히 하나만 써야 해(다른 표현 쓰지 마). 이유는 "
-            "간결하게 한 문장으로.\n"
-            "조건을 만족하는 기업이 하나도 없으면(대부분의 날이 이럴 거야) 이 섹션(제목 포함) "
-            "전체를 통째로 생략해.\n\n"
-        )
+    part1, part2 = (
+        (DAILY_DIGEST_MORNING_PART1, DAILY_DIGEST_MORNING_PART2) if digest_time == "morning"
+        else (DAILY_DIGEST_EVENING_PART1, DAILY_DIGEST_EVENING_PART2)
+    )
 
     prompt = (
         f"아래는 오늘 하루 동안 여러 텔레그램 채널에서 수집된 주식/투자 관련 정보 {count}건과, "
-        "미국 주요 시장 지표의 정량 데이터야. 이 둘을 종합해서 하루 정리 브리핑을 작성해줘.\n\n"
+        "금리·에너지·주식·환율 정량 데이터야. 이 둘을 종합해서 데일리 마켓 노트를 작성해줘.\n\n"
         "[프롬프트 안내 — 이 대괄호 섹션들은 지시사항 구분용이니 실제 출력에는 절대 포함하지 마]\n\n"
-        "전체 구성은 아래 두 파트로 나뉘어:\n"
-        "PART 1) 오늘의 핵심 이슈 정리\n"
-        "PART 2) 정량 데이터와 결합한 4가지 전략적 분석\n\n"
-        "[PART 1 지시사항]\n"
-        "오늘의 핵심 이슈 3~5개를 주제별로 묶어서 정리해줘. 각 이슈마다 아래 형식으로:\n"
-        "   - 이슈 요약 1~2문장 (글머리 기호 '-' 사용)\n"
-        "   그 바로 아래 줄에 공백 4칸(스페이스 4개)으로 들여쓴 뒤 '💡 '로 시작하는 그 이슈만의 "
-        "인사이트 1문장을 붙여줘 — 그 이슈가 관련 종목/섹터에 왜, 어떤 경로로 영향을 주는지 "
-        "구체적으로. 확실한 연관성이 없으면 그 이슈에는 인사이트 줄을 생략해도 돼.\n"
-        "   이슈(요약+인사이트) 묶음과 다음 이슈 묶음 사이는 빈 줄 1개로 구분해줘.\n\n"
-        "[PART 2 지시사항]\n"
-        "PART 1의 마지막 이슈 뒤에 빈 줄 2개를 두고, 아래 4개 섹션을 순서대로 작성해줘. 각 "
-        "섹션 제목(이모지 포함)은 아래 표기를 정확히 그대로 사용하고, 섹션 사이는 빈 줄 1개로 "
-        "구분해줘. 반드시 위에서 제공한 정량 데이터의 실제 수치를 인용하면서 서술해 — 수치 "
-        "없이 뭉뚱그린 서술(예: '지수가 상승했다')은 안 되고, '나스닥 100이 X.XX% 상승해 "
-        "YY,YYY 부근에서 거래된다'처럼 실제 값을 반드시 넣어줘. 정량 데이터가 없는 경우에만 "
-        "텔레그램 텍스트 정보만으로 서술해.\n\n"
-        "🌡️ 시장 온도계\n"
-        "현재 미국 3대 지수(S&P 500, 나스닥 100, 러셀 2000)의 위치와 등락률, VIX 수치가 "
-        "나타내는 변동성 수준(예: VIX 20 미만은 안정, 20~30은 경계, 30 이상은 공포 국면), "
-        "국채금리 수준을 종합해서 현재 시장 심리 상태(탐욕/안정/경계/공포 중 어디에 가까운지)를"
-        " 2~3문장으로 요약해줘.\n\n"
-        "🔀 금리-섹터 디커플링 분석\n"
-        "국채금리(10년물, 2년물 프록시)의 움직임과 기술주·반도체·AI 섹터 주가 사이의 관계를 "
-        "분석해줘. 금리가 오르는데도 나스닥/반도체지수가 버티고 있다면 그 이유(예: 실적 기대감이"
-        " 금리 부담을 상쇄, 특정 대형주 쏠림 등)를 텔레그램에서 수집된 정보와 연결해서 설명하고,"
-        " 반대로 금리와 기술주가 같은 방향으로 움직이고 있다면 그것도 그대로 짚어줘. 실제로 "
-        "디커플링이 관찰되지 않는 날도 있으니, 데이터가 그렇다면 '오늘은 금리와 기술주가 같은 "
-        "방향으로 움직이며 디커플링이 뚜렷하지 않다'처럼 사실대로 서술해. 3~4문장.\n\n"
-        "🌐 글로벌 머니무브\n"
-        "S&P 500과 러셀 2000의 등락률 차이를 근거로 자금이 대형 기술주(빅테크)에 쏠려있는지, "
-        "아니면 중소형주로 분산되고 있는지 판단해줘. 그리고 이 자금 흐름 패턴이 한국 증시로의 "
-        "외국인 수급에 어떤 영향을 줄 수 있을지(예: 위험선호 심리 확대 시 신흥국/코스피로 자금 "
-        "유입 기대, 위험회피 시 자금 이탈 우려) 예측해줘. 3~4문장.\n\n"
-        "🌙 오늘 밤 미장 핵심 관전 포인트\n"
-        "텔레그램에서 수집된 정보 중 오늘 밤~내일 예정된 미국 거시경제 지표 발표(CPI, PCE, "
-        "고용지표 등)나 주요 기업 실적 발표 일정이 있다면 그것들을 짚고, 각각이 시장에 미칠 "
-        "수 있는 영향과 이에 대한 대응 전략(예: 특정 지표 발표 전 포지션 축소, 실적 발표 앞둔"
-        " 변동성 확대 유의 등)을 제시해줘. 예정된 일정이 텔레그램 정보에 없으면, 오늘 흐름을 "
-        "근거로 내일 시장이 주목할 만한 변수를 대신 짚어줘. 3~4문장.\n\n"
-        + earnings_forward_block
-        + earnings_review_block
-        + "라벨(예: '핵심 이슈:', '인사이트:', '오늘의 인사이트:')은 붙이지 말고 자연스러운 글로 "
-        "작성해 (단, 이슈별 인사이트 줄 앞의 '💡 ', PART 2의 4개 섹션 제목, '📅 오늘의 실적 "
-        "발표' 제목, '📊 실적 리뷰' 제목은 표기 그대로 유지). 화살표(➡️)는 우리 쪽에서 자동으로 "
-        "붙이니 너는 붙이지 마.\n"
-        "중요: 마크다운 굵게 표시(**텍스트**)나 마크다운 코드펜스(```)를 절대 쓰지 마. 이 결과는 "
-        "우리 쪽에서 이미 <blockquote> 태그로 감싸서 인용블럭 형태로 전송하기 때문에, 네가 마크다운 "
-        "기호나 코드펜스를 또 쓰면 별표(**)나 백틱(```)이 그대로 글자로 노출돼서 지저분해 보여. "
-        "순수 텍스트로만, 백틱이나 별표 없이 작성해.\n"
-        "중복되거나 사소한 내용은 과감히 생략하고, 정말 중요한 것 위주로 압축해.\n\n"
+        + DAILY_DIGEST_ROLE_INSTRUCTION
+        + part1
+        + part2
+        + DAILY_DIGEST_WRITING_PRINCIPLES
+        + DAILY_DIGEST_FORMAT_GUARD
         + TRUMP_WORDING_INSTRUCTION + "\n\n"
         + quant_section
         + f"[오늘의 정보 모음]\n{entries_text}"
     )
-    return call_llm(prompt, max_tokens=2500) or None
+    return call_llm(prompt, max_tokens=3000) or None
 
 
 INDICATOR_COUNTRY_RE = re.compile(r"국가\s*[:：]\s*([^\s*\n]+)")
@@ -2660,66 +2666,21 @@ async def send_album_to_summary_chat(
             return None
 
 
-DIGEST_STRATEGY_PREFIXES = ("🌡️", "🔀", "🌐", "🌙", "➡️ 🌙")
+DIGEST_STRATEGY_PREFIXES = ("🌡️", "⚡", "🔗", "🔀", "🌐", "🌾", "➡️")
 
 
 def classify_digest_blocks(rebuilt_blocks: list) -> list:
     """정리 블록들을 종류별로 분류: title(PART 1/2 라벨), issue(핵심 이슈, 이슈+인사이트),
-    strategy(정량 분석 섹션, 제목+본문), earnings_title/earnings(오늘의 실적 발표, 예정),
-    review_title/review(실적 리뷰: 호재/악재/중립, 이미 발표됨), other(그 외 일반 문단)."""
+    strategy(시장 구조 분석 섹션, 제목+본문), other(그 외 일반 문단)."""
     classified = []
-    in_earnings_section = False
-    in_review_section = False
-    REVIEW_TITLES = ("📊 어젯밤 미국 실적 리뷰", "📊 오늘 한국 실적 리뷰")
     for block in rebuilt_blocks:
         lines = block.split("\n")
         first = lines[0].strip()
         if first.startswith(("PART 1", "PART 2")) and len(lines) == 1:
             classified.append({"type": "title", "text": first})
-            in_earnings_section = False
-            in_review_section = False
-        elif first.startswith("📅 오늘의 실적 발표") and len(lines) == 1:
-            classified.append({"type": "earnings_title", "text": first})
-            in_earnings_section = True
-            in_review_section = False
-        elif first.startswith(REVIEW_TITLES) and len(lines) == 1:
-            classified.append({"type": "review_title", "text": first})
-            in_review_section = True
-            in_earnings_section = False
         elif first.startswith(DIGEST_STRATEGY_PREFIXES):
             body = "\n".join(lines[1:]).strip()
             classified.append({"type": "strategy", "title": first, "body": body})
-            in_earnings_section = False
-            in_review_section = False
-        elif first.startswith("- ") and in_earnings_section:
-            # 미국 기업: "- 회사명 (티커) - BMO" 또는 "- 회사명 (티커) - AMC"
-            # 한국 기업: "- 회사명 (종목코드)" (시각 정보 없음)
-            m = re.match(r"^-\s*(.+?)\s*\((.+?)\)\s*(?:-\s*(BMO|AMC))?\s*$", first)
-            if m:
-                bmo_amc = m.group(3)
-                detail = ("장 시작 전" if bmo_amc == "BMO" else "장 마감 후") if bmo_amc else ""
-                classified.append({
-                    "type": "earnings", "company": m.group(1), "ticker": m.group(2), "detail": detail,
-                })
-            else:
-                # 형식이 깨진 줄(LLM 오타 등)은 어설프게 보여주는 것보다 통째로 드롭하는 게 낫다고
-                # 판단 — 예전엔 이 줄을 그대로 회사명 취급해서 정체불명의 문장이 카드에 섞여 나왔음
-                log.warning(f"[정리] 실적 발표 줄 형식 파싱 실패, 드롭: {first!r}")
-        elif first.startswith("- ") and in_review_section:
-            # "- 회사명 (티커) - 호재/악재/중립 - 한 줄 이유" 형식. 다만 LLM이 잘 알려지지 않은
-            # 소형주는 한글 회사명을 몰라 괄호 없이 티커만 쓰는 경우가 있어(예: "- LGVN - 악재 - ...")
-            # 괄호(티커) 부분은 선택적으로 허용 — 없으면 회사명 자리에 쓴 값을 티커로도 재사용.
-            m = re.match(r"^-\s*(.+?)\s*(?:\((.+?)\))?\s*-\s*(호재|악재|중립)\s*-\s*(.+)$", first)
-            if m:
-                company, ticker = m.group(1), m.group(2)
-                classified.append({
-                    "type": "review", "company": company, "ticker": ticker or company,
-                    "verdict": m.group(3), "reason": m.group(4),
-                })
-            else:
-                # LLM이 '호재'/'악재'/'중립'을 오타내는 등 형식이 깨지면(예: '호르재'), 판정
-                # 자체를 신뢰할 수 없으므로 어설프게 보여주지 말고 통째로 드롭
-                log.warning(f"[정리] 실적 리뷰 줄 형식 파싱 실패, 드롭: {first!r}")
         elif first.startswith("- "):
             insight = None
             issue_lines = []
@@ -2746,14 +2707,6 @@ def render_digest_text_bold(classified_blocks: list) -> str:
                 # PART 1과 PART 2 사이를 시각적으로 확실히 구분
                 parts.append(DIVIDER)
             parts.append(f"<b>{html.escape(b['text'])}</b>")
-        elif b["type"] == "earnings_title":
-            if parts:
-                parts.append(DIVIDER)
-            parts.append(f"<b>{html.escape(b['text'])}</b>")
-        elif b["type"] == "review_title":
-            if parts:
-                parts.append(DIVIDER)
-            parts.append(f"<b>{html.escape(b['text'])}</b>")
         elif b["type"] == "strategy":
             title_html = f"<b>{html.escape(b['title'])}</b>"
             body_html = html.escape(b["body"]) if b["body"] else ""
@@ -2763,15 +2716,6 @@ def render_digest_text_bold(classified_blocks: list) -> str:
             if b["insight"]:
                 issue_html += f"\n    💡 {html.escape(b['insight'])}"
             parts.append(issue_html)
-        elif b["type"] == "earnings":
-            ticker_part = f" ({html.escape(b['ticker'])})" if b["ticker"] else ""
-            detail_part = f" - {html.escape(b['detail'])}" if b["detail"] else ""
-            parts.append(f"- {html.escape(b['company'])}{ticker_part}{detail_part}")
-        elif b["type"] == "review":
-            ticker_part = f" ({html.escape(b['ticker'])})" if b["ticker"] else ""
-            verdict_part = f" - {html.escape(b['verdict'])}" if b["verdict"] else ""
-            reason_part = f" - {html.escape(b['reason'])}" if b["reason"] else ""
-            parts.append(f"- {html.escape(b['company'])}{ticker_part}{verdict_part}{reason_part}")
         else:
             parts.append(html.escape(b["text"]))
     return "\n\n".join(parts)
@@ -2817,10 +2761,6 @@ def render_digest_html(
     그려서 넣음 (조회 실패 시 게이지 없이 나머지 내용만 렌더링)."""
     issue_html_parts = []
     strategy_html_parts = []
-    earnings_html_parts = []
-    review_html_parts = []
-    review_title = next((b["text"] for b in classified_blocks if b["type"] == "review_title"), "실적 리뷰")
-    VERDICT_CLASS = {"호재": "pos", "악재": "neg", "중립": "neu"}
     for b in classified_blocks:
         if b["type"] == "issue":
             insight_block = (
@@ -2842,28 +2782,6 @@ def render_digest_html(
             strategy_html_parts.append(
                 f'<div class="strategy{extra_class}"><div class="strategy-title{title_class}">'
                 f'{html.escape(title_text)}</div>{body_paragraphs}</div>'
-            )
-        elif b["type"] == "earnings":
-            ticker_html = f'<span class="earnings-ticker">{html.escape(b["ticker"])}</span>' if b["ticker"] else ""
-            if b["detail"]:
-                is_bmo = "장 시작 전" in b["detail"]
-                badge_class = "bmo" if is_bmo else "amc"
-                right_html = f'<span class="earnings-badge {badge_class}">{html.escape(b["detail"])}</span>'
-            else:
-                right_html = ""
-            earnings_html_parts.append(
-                f'<div class="earnings-row"><div><span class="earnings-name">{html.escape(b["company"])}</span>'
-                f'{ticker_html}</div>{right_html}</div>'
-            )
-        elif b["type"] == "review":
-            ticker_html = f'<span class="review-ticker">{html.escape(b["ticker"])}</span>' if b["ticker"] else ""
-            badge_class = VERDICT_CLASS.get(b["verdict"], "neu")
-            badge_html = f'<span class="review-badge {badge_class}">{html.escape(b["verdict"])}</span>' if b["verdict"] else ""
-            reason_html = f'<div class="review-detail">{html.escape(b["reason"])}</div>' if b["reason"] else ""
-            review_html_parts.append(
-                f'<div class="review-row"><div class="review-head">'
-                f'<div><span class="review-name">{html.escape(b["company"])}</span>{ticker_html}</div>'
-                f'{badge_html}</div>{reason_html}</div>'
             )
 
     # 시장 온도계 게이지: VIX 실제 값을 10~40 구간에 매핑해서 마커 위치(%)를 계산.
@@ -2965,32 +2883,6 @@ def render_digest_html(
   .num-pos {{ color: #33c98a; font-family: 'IBM Plex Mono', monospace; font-weight: 600; }}
   .num-neg {{ color: #ff6b7f; font-family: 'IBM Plex Mono', monospace; font-weight: 600; }}
   .num-neu {{ color: var(--accent-cool); font-family: 'IBM Plex Mono', monospace; font-weight: 600; }}
-  .review-card {{ background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px;
-    padding: 18px 20px; margin-bottom: 8px; }}
-  .review-row {{ padding: 14px 0; border-top: 1px solid var(--border); }}
-  .review-row:first-of-type {{ border-top: none; padding-top: 0; }}
-  .review-head {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }}
-  .review-name {{ font-size: 14.5px; color: var(--text-primary); font-weight: 600; }}
-  .review-ticker {{ font-family: 'IBM Plex Mono', monospace; font-size: 12px;
-    color: var(--text-tertiary); margin-left: 6px; font-weight: 400; }}
-  .review-badge {{ font-family: 'IBM Plex Mono', monospace; font-size: 11px; font-weight: 700;
-    padding: 4px 10px; border-radius: 20px; white-space: nowrap; border: 1px solid transparent; }}
-  .review-badge.pos {{ background: rgba(51,201,138,0.12); color: #58d9a3; border-color: rgba(51,201,138,0.28); }}
-  .review-badge.neg {{ background: rgba(255,107,127,0.12); color: #ff8fa3; border-color: rgba(255,107,127,0.28); }}
-  .review-badge.neu {{ background: rgba(141,148,166,0.12); color: #aab0bf; border-color: rgba(141,148,166,0.28); }}
-  .review-detail {{ font-size: 13.5px; color: var(--text-secondary); }}
-  .earnings-card {{ background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px;
-    padding: 18px 20px; margin-bottom: 8px; }}
-  .earnings-row {{ display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 0; border-top: 1px solid var(--border); }}
-  .earnings-row:first-of-type {{ border-top: none; padding-top: 0; }}
-  .earnings-name {{ font-size: 14.5px; color: var(--text-primary); font-weight: 500; }}
-  .earnings-ticker {{ font-family: 'IBM Plex Mono', monospace; font-size: 12px;
-    color: var(--text-tertiary); margin-left: 6px; }}
-  .earnings-badge {{ font-family: 'IBM Plex Mono', monospace; font-size: 11px; font-weight: 600;
-    padding: 4px 9px; border-radius: 20px; white-space: nowrap; }}
-  .earnings-badge.bmo {{ background: rgba(51,201,138,0.12); color: #58d9a3; }}
-  .earnings-badge.amc {{ background: rgba(111,168,255,0.12); color: #8fbcff; }}
   .footer {{ margin-top: 36px; padding-top: 18px; border-top: 1px solid var(--border);
     font-size: 12px; color: var(--text-tertiary); font-family: 'IBM Plex Mono', monospace; }}
   @media (max-width: 420px) {{ h1 {{ font-size: 25px; }} .wrap {{ padding: 24px 16px 0; }} }}
@@ -3005,16 +2897,8 @@ def render_digest_html(
   <div class="part-label"><div class="line"></div><span>Part 1 · 오늘의 핵심 이슈</span><div class="line"></div></div>
   {"".join(issue_html_parts)}
 
-  <div class="part-label"><div class="line"></div><span>Part 2 · 정량 데이터 결합 전략 분석</span><div class="line"></div></div>
+  <div class="part-label"><div class="line"></div><span>Part 2 · 시장 구조 분석</span><div class="line"></div></div>
   {"".join(strategy_html_parts)}
-{f'''
-  <div class="part-label"><div class="line"></div><span>오늘의 실적 발표</span><div class="line"></div></div>
-  <div class="earnings-card">{"".join(earnings_html_parts)}</div>
-''' if earnings_html_parts else ""}
-{f'''
-  <div class="part-label"><div class="line"></div><span>{html.escape(review_title.lstrip("📊 ").strip())}</span><div class="line"></div></div>
-  <div class="review-card">{"".join(review_html_parts)}</div>
-''' if review_html_parts else ""}
   <div class="footer">TELEGRAM STOCK DEDUP BOT · AUTO-GENERATED SUMMARY</div>
 </div>
 </body>
@@ -3259,50 +3143,30 @@ async def main():
         entries_text = "\n\n".join(entry_lines)
         entries_text = entries_text[:40000]  # 프롬프트 길이 안전장치 (요약본 위주라 넉넉하게 잡음)
 
-        # yfinance 정량 데이터 조회 (네트워크 호출이라 스레드로 분리, 실패해도 None 반환되어
-        # 정성 데이터만으로 정리가 계속 생성됨). 구조화된 딕셔너리로 받아서, LLM 프롬프트용
-        # 텍스트 변환뿐 아니라 HTML의 시장 온도계 게이지도 실제 수치로 그릴 수 있게 함.
-        quant_data = await asyncio.to_thread(fetch_market_quant_data)
-        quant_data_text = format_quant_data_text(quant_data) if quant_data else None
-        if quant_data:
-            log.info("정량 시장 데이터 조회 완료, 정리에 포함함")
-        else:
-            log.warning("정량 시장 데이터 조회 실패/누락 → 텔레그램 텍스트만으로 정리 생성")
-
         # end_hour(=이 정리를 보내는 트리거 시각)가 정오 이전이면 '오전'(8시 발송, 어젯밤
         # 미국장이 방금 끝나고 한국장이 곧 열리는 시점), 그 외면 '오후'(18시 발송, 오늘
-        # 한국장이 막 끝나고 미국장이 곧 열리는 시점). generate_daily_digest 내부에서 이 값에
-        # 따라 '실적 발표'(곧 열릴 시장)와 '실적 리뷰'(방금 닫힌 시장)의 대상 국가가 각각
-        # 자동으로 정해짐.
+        # 한국장이 막 끝나고 미국장이 곧 열리는 시점).
         digest_time = "morning" if end_hour < 12 else "evening"
-        forward_region = "KR" if digest_time == "morning" else "US"
-        review_region = "US" if digest_time == "morning" else "KR"
 
-        # Finnhub 실적 캘린더 조회 (미국 쪽에만 해당, LLM 결과를 나중에 검증하는 용도).
-        # FINNHUB_API_KEY가 없으면 None으로 남아 validate_us_earnings_blocks가 검증을
-        # 건너뛰고(기존 LLM 단독 추정 방식으로 폴백) 그대로 통과시킴.
-        us_earnings_forward = None
-        us_earnings_review = None
-        if FINNHUB_API_KEY and (forward_region == "US" or review_region == "US"):
-            us_today = datetime.now(ZoneInfo("America/New_York")).date()
-            if forward_region == "US":
-                # 딱 '오늘'(=지금 막 열리려는 미국 장의 거래일, ET 기준) 하루만 조회.
-                # 예전엔 다음날까지 포함했는데, 그러면 다음 미국 거래일(=하루 뒤, 아직
-                # 열리지도 않은 그다음 장)의 AMC/BMO 예정 기업까지 "오늘의 실적 발표"에
-                # 확인된 것으로 끼어들 수 있었음 (예: 18시 정리 시점 기준 ET로는 아직
-                # 오늘 장도 시작 전인데, 다음날 장마감후(AMC) 발표 예정인 AMD가 마치
-                # 오늘 밤 발표인 것처럼 포함된 사례).
-                raw_forward = await asyncio.to_thread(
-                    fetch_finnhub_earnings_calendar, us_today, us_today
-                )
-                us_earnings_forward = build_us_earnings_forward_candidates(raw_forward)
-                log.info(f"Finnhub 실적 발표(예정) 후보 {len(us_earnings_forward)}건 조회")
-            if review_region == "US":
-                raw_review = await asyncio.to_thread(
-                    fetch_finnhub_earnings_calendar, us_today - timedelta(days=4), us_today
-                )
-                us_earnings_review = await asyncio.to_thread(build_us_earnings_review_candidates, raw_review)
-                log.info(f"Finnhub 실적 리뷰(결과) 후보 {len(us_earnings_review)}건 조회")
+        # 정량 데이터 조회 (전부 네트워크 호출이라 스레드로 분리, 실패해도 None 반환되어 정성
+        # 데이터만으로 정리가 계속 생성됨). 주식/변동성/환율/에너지는 yfinance, 금리(명목/실질/
+        # BEI)는 FRED(API 키 불필요)에서 가져오고, 오후 정리에서만 아시아 지수도 추가 조회함.
+        quant_data = await asyncio.to_thread(fetch_market_quant_data)
+        rates_data = await asyncio.to_thread(fetch_rates_quant_data)
+        asia_data = await asyncio.to_thread(fetch_asia_quant_data) if digest_time == "evening" else None
+
+        quant_text_parts = []
+        if quant_data:
+            quant_text_parts.append(f"[주식·변동성·환율·에너지]\n{format_quant_data_text(quant_data)}")
+        if rates_data:
+            quant_text_parts.append(f"[금리 — FRED, 기준일 명시됨]\n{format_rates_data_text(rates_data)}")
+        if asia_data:
+            quant_text_parts.append(f"[아시아 증시]\n{format_quant_data_text(asia_data)}")
+        quant_data_text = "\n\n".join(quant_text_parts) if quant_text_parts else None
+        if quant_data_text:
+            log.info("정량 데이터 조회 완료, 정리에 포함함")
+        else:
+            log.warning("정량 데이터 조회 실패/누락 → 텔레그램 텍스트만으로 정리 생성")
 
         digest = await asyncio.to_thread(
             generate_daily_digest, entries_text, len(entry_lines), quant_data_text, digest_time,
@@ -3348,11 +3212,7 @@ async def main():
         # 블록을 나눠 빈 줄 1개로 재조립함 (LLM의 빈 줄 삽입 여부와 무관하게 항상 동일한 간격
         # 보장). PART 2 섹션들은 '-' 불릿이 아니라 일반 문단으로 이어지므로, 이 고정 헤더
         # 문자열을 별도로 인식해야 서로 다른 섹션이 한 덩어리로 뭉치는 걸 막을 수 있음.
-        DIGEST_SECTION_HEADERS = (
-            "PART 1", "PART 2", "🌡️ 시장 온도계", "🔀 금리-섹터 디커플링 분석",
-            "🌐 글로벌 머니무브", "🌙 오늘 밤", "📅 오늘의 실적 발표",
-            "📊 어젯밤 미국 실적 리뷰", "📊 오늘 한국 실적 리뷰",
-        )
+        DIGEST_SECTION_HEADERS = ("PART 1", "PART 2", "🌡️", "⚡", "🔗", "🔀", "🌐", "🌾", "➡️")
         lines = digest_clean.split("\n")
         rebuilt_blocks = []
         current_block: list = []
@@ -3363,7 +3223,7 @@ async def main():
                 continue
             is_bullet = stripped.startswith("- ")
             is_insight = "💡" in stripped[:6]
-            is_section_header = stripped.startswith(DIGEST_SECTION_HEADERS) or stripped.startswith("➡️")
+            is_section_header = stripped.startswith(DIGEST_SECTION_HEADERS)
             starts_new_block = False
             if (is_bullet or is_section_header) and current_block:
                 starts_new_block = True
@@ -3384,16 +3244,18 @@ async def main():
             rebuilt_blocks.append("\n".join(current_block).strip())
         rebuilt_blocks = [b for b in rebuilt_blocks if b]
 
-        # '🌙 오늘 밤 미장 핵심 관전 포인트' 섹션을 화살표(➡️)로 시작하도록, 그리고 그 앞에는
-        # 빈 줄 2개로 구분되도록 강제 보정. 실제 렌더링(텍스트 굵게 처리, HTML)에 쓰이는
-        # rebuilt_blocks 리스트를 '직접' 수정해야 함 — 예전엔 별도로 재분할한 문자열만
-        # 고쳐서, 정작 classify_digest_blocks가 보는 rebuilt_blocks에는 반영이 안 되는
-        # 버그가 있었음 (🌙 섹션에 화살표가 안 붙던 원인).
-        tonight_idx = next((i for i, b in enumerate(rebuilt_blocks) if b.startswith("🌙 오늘 밤")), None)
-        if tonight_idx is None and rebuilt_blocks:
-            tonight_idx = len(rebuilt_blocks) - 1  # 못 찾으면 예전처럼 마지막 블록
-        if tonight_idx is not None and not rebuilt_blocks[tonight_idx].startswith("➡️"):
-            rebuilt_blocks[tonight_idx] = "➡️ " + rebuilt_blocks[tonight_idx]
+        # (오후 정리 전용) '🌙 오늘 밤 미장 핵심 관전 포인트' 섹션을 화살표(➡️)로 시작하도록
+        # 강제 보정. 실제 렌더링(텍스트 굵게 처리, HTML)에 쓰이는 rebuilt_blocks 리스트를
+        # '직접' 수정해야 함 — 예전엔 별도로 재분할한 문자열만 고쳐서, 정작
+        # classify_digest_blocks가 보는 rebuilt_blocks에는 반영이 안 되는 버그가 있었음
+        # (🌙 섹션에 화살표가 안 붙던 원인). 오전 정리에는 이 섹션 자체가 없으므로 건너뜀 —
+        # 안 그러면 오전 정리의 마지막 섹션(🌐 글로벌 로테이션)에 잘못 화살표가 붙는다.
+        if digest_time == "evening":
+            tonight_idx = next((i for i, b in enumerate(rebuilt_blocks) if b.startswith("🌙 오늘 밤")), None)
+            if tonight_idx is None and rebuilt_blocks:
+                tonight_idx = len(rebuilt_blocks) - 1  # 못 찾으면 예전처럼 마지막 블록
+            if tonight_idx is not None and not rebuilt_blocks[tonight_idx].startswith("➡️"):
+                rebuilt_blocks[tonight_idx] = "➡️ " + rebuilt_blocks[tonight_idx]
         digest_clean = "\n\n".join(rebuilt_blocks) if rebuilt_blocks else digest_clean
 
         is_overnight = start_hour >= end_hour
@@ -3402,12 +3264,6 @@ async def main():
 
         # 텍스트(굵은 제목)와 HTML 파일 둘 다, 같은 블록 구조에서 함께 만듦
         classified_blocks = classify_digest_blocks(rebuilt_blocks) if rebuilt_blocks else []
-        # LLM이 텔레그램 텍스트만 보고 골라 쓴 미국 실적 발표/리뷰 항목을 Finnhub 실측
-        # 데이터로 검증 — 확인 안 되는 항목(할루시네이션, 비거래일 등)은 드롭하고, 확인되는
-        # 항목은 BMO/AMC·호재/악재/중립 값을 실제 데이터로 덮어씀
-        classified_blocks = validate_us_earnings_blocks(
-            classified_blocks, forward_region, review_region, us_earnings_forward, us_earnings_review,
-        )
 
         sent_msg_id = None
         if TELEGRAM_BOT_TOKEN:
@@ -3450,17 +3306,6 @@ async def main():
             log.info("정리 전송 완료(유저봇)")
             now_kst_sent = datetime.now(timezone.utc) + timedelta(hours=9)
             await asyncio.to_thread(set_digest_sent_time, end_hour, now_kst_sent.isoformat())
-
-        if sent_msg_id and review_region == "US":
-            # 이번 정리에 실제로 포함된 리뷰 대상만 "완료"로 기록해서, 다음 정리들에서
-            # 같은 실적이 반복해서 다시 리뷰 후보로 뽑히지 않도록 함.
-            reviewed_tickers = [
-                b["ticker"] for b in classified_blocks
-                if b.get("type") == "review" and b.get("ticker")
-            ]
-            if reviewed_tickers:
-                await asyncio.to_thread(mark_earnings_reviewed, reviewed_tickers)
-                log.info(f"실적 리뷰 완료 기록: {', '.join(reviewed_tickers)}")
 
     async def _digest_loop(trigger_hour: int, start_hour: int, end_hour: int):
         def _now_kst():
