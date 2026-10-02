@@ -16,10 +16,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: telegram
+          persist-credentials: false
 
       - name: Deploy
         run : |
           rsync -av --delete \
+            --exclude '.git' \
             --exclude '.env' \
             --exclude '.venv' \
             --exclude 'venv' \
