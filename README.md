@@ -55,10 +55,9 @@ LLM 호출을 자동 확정 가능한 구간 밖으로 최대한 밀어낸 게 �
 
 `LLM_PROVIDER`로 1차 provider(anthropic/openai/gemini)를 고르고,
 `LLM_FALLBACK_PROVIDERS`로 실패 시 순서대로 넘어갈 provider를 지정할 수
-있습니다. Gemini는 무료 티어 rate limit(분당 15회)에 걸리기 쉬워서,
-`GEMINI_API_KEYS`에 콤마로 여러 키를 등록하면 요청마다 순환 사용하고, 키별로
-남은 쿨다운을 추적해 전부 쿨다운 중이면 `GEMINI_MAX_COOLDOWN_WAIT`만큼만
-기다립니다.
+있습니다. Gemini 호출이 분당 요청 제한에 걸리면 `GEMINI_API_KEYS`에 등록된
+키들을 순환 사용해 요청을 계속 처리하고, 키별로 남은 쿨다운을 추적해 전부
+쿨다운 중이면 `GEMINI_MAX_COOLDOWN_WAIT`만큼만 기다립니다.
 
 ## 그 외 기능
 
