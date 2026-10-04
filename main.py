@@ -269,7 +269,8 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash")
 
 # 여러 개의 Gemini API 키를 콤마로 등록하면, 요청마다 순서를 돌려가며 사용하고
 # 특정 키가 실패(rate limit 등)하면 같은 호출 안에서 자동으로 다음 키를 시도함.
-# 각 키가 별도 프로젝트로 발급된 것이면 사실상 무료 티어 한도가 키 개수만큼 늘어나는 효과가 있음.
+# 한 키가 분당 한도에 걸려도 바로 멈추지 않고 다른 키로 계속 처리를 이어갈 수 있게 하는
+# 가용성 목적의 폴백이며, 각 키는 자기 몫의 분당 한도(GEMINI_PER_KEY_RPM) 안에서만 사용함.
 _gemini_keys_raw = os.environ.get("GEMINI_API_KEYS", "").strip()
 GEMINI_API_KEYS = [k.strip() for k in _gemini_keys_raw.split(",") if k.strip()]
 if not GEMINI_API_KEYS and GEMINI_API_KEY:
