@@ -211,6 +211,11 @@ DAILY_DIGEST_HOUR = int(os.environ.get("DAILY_DIGEST_HOUR", 18))
 # 야간 정리: DAILY_DIGEST_HOUR(18시)부터 다음날 이 시각까지 모아서, 이 시각에 전송.
 # DAILY_DIGEST_ENABLED가 켜져 있으면 이것도 같이 켜짐 (같은 on/off 스위치 공유).
 NIGHT_DIGEST_END_HOUR = int(os.environ.get("NIGHT_DIGEST_END_HOUR", 8))
+# 정리 스케줄러가 실제 시계를 확인하는 주기(초) — 짧아야 맥이 잠들었다 깬 직후 바로 발송됨
+DIGEST_POLL_SECONDS = 30
+# 정리 생성/전송이 실패했을 때 같은 회차를 다시 시도하는 간격과 최대 시도 횟수
+DIGEST_RETRY_INTERVAL = timedelta(minutes=10)
+DIGEST_MAX_ATTEMPTS = 3
 _digest_chat_raw = os.environ.get("SUMMARY_CHAT", "").strip()  # 정리(주간/야간)를 보낼 채널 (선택, 없으면 DIGEST_CHAT)
 
 # Telethon 라이브러리의 알려진 이슈("Server sent a very old message" 반복 후 새 메시지 수신이
@@ -808,7 +813,7 @@ def _strip_trailing_url_punctuation(url: str) -> str:
 
 def _is_generic_telegram_channel_link(url: str) -> bool:
     """'t.me/채널명'처럼 특정 게시물이 아니라 채널 자체를 가리키는 링크인지 확인.
-    많은 채널이 매 게시물 끝에 자기 채널 홍보 링크(예: 't.me/davidstocknew')를 서명처럼
+    많은 채널이 매 게시물 끝에 자기 채널 홍보 링크(예: 't.me/<SOURCE_CHATS>')를 서명처럼
     붙이는데, 이건 그 채널의 '모든' 게시물에 똑같이 등장해서 그대로 두면 완전히 다른 두
     게시물이 '같은 URL을 공유한다'고 오인되는 원인이 됨. 반면 't.me/채널명/12345'처럼
     메시지 ID까지 포함된 링크는 특정 게시물을 정확히 가리키므로 제외하지 않음."""
@@ -1730,19 +1735,16 @@ def summarize_html_digest(text: str) -> Optional[str]:
     return call_llm(prompt, max_tokens=800) or None
 
 
-def _kst_bounds_today(start_hour: int, end_hour: int) -> tuple:
-    """한국시간 기준 start_hour~end_hour 구간을 UTC datetime 쌍으로 반환.
-    start_hour >= end_hour면(예: 18시~다음날 8시처럼 자정을 걸치는 야간 구간) 시작을
+def _kst_slot_bounds(slot_end_kst: datetime, start_hour: int) -> tuple:
+    """정리 회차가 다루는 구간을 UTC datetime 쌍으로 반환. slot_end_kst는 그 회차의 발송
+    예정 시각(값만 KST로 밀어둔 UTC aware datetime). '지금'이 아니라 회차 기준으로 계산해야,
+    늦게 발송되는 회차도 원래 자기 구간(예: 어제 06~18시)을 정리함.
+    start_hour >= 종료 시각이면(예: 18시~다음날 8시처럼 자정을 걸치는 야간 구간) 시작을
     전날로 계산함."""
-    now_kst = datetime.now(timezone.utc) + timedelta(hours=9)  # 값만 KST로 밀어둔 것 (tzinfo는 그대로 UTC)
-    end_kst = now_kst.replace(hour=end_hour, minute=0, second=0, microsecond=0)
-    if start_hour >= end_hour:
-        start_kst = (end_kst - timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
-    else:
-        start_kst = end_kst.replace(hour=start_hour, minute=0, second=0, microsecond=0)
-    start_utc = start_kst - timedelta(hours=9)
-    end_utc = end_kst - timedelta(hours=9)
-    return start_utc, end_utc
+    start_kst = slot_end_kst.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+    if start_hour >= slot_end_kst.hour:
+        start_kst -= timedelta(days=1)
+    return start_kst - timedelta(hours=9), slot_end_kst - timedelta(hours=9)
 
 
 MARKET_QUANT_TICKERS = {
@@ -3131,16 +3133,17 @@ async def main():
             log.warning(f"재전송 큐 저장 실패(무시하고 계속): {e}")
         return None
 
-    async def _run_digest(start_hour: int, end_hour: int):
-        start_utc, end_utc = _kst_bounds_today(start_hour, end_hour)
+    async def _run_digest(start_hour: int, end_hour: int, slot_end_kst: datetime):
+        """slot_end_kst 회차의 정리를 생성·전송. 성공(또는 내용 없음으로 스킵)하면 그 회차를
+        처리 완료로 기록함 — 기록이 안 남았으면 실패한 것(_digest_loop가 재시도 판단에 사용)."""
+        start_utc, end_utc = _kst_slot_bounds(slot_end_kst, start_hour)
         async with llm_processing_lock:
             rows, dup_rows = await asyncio.to_thread(fetch_digest_rows, start_utc, end_utc)
         if not rows and not dup_rows:
             log.warning(f"정리({start_hour:02d}~{end_hour:02d}시): 새로 등록된 정보가 없어 스킵")
-            # 스킵도 "이번 주기는 정상적으로 처리했다"는 뜻이므로 발송 시각을 기록해야 함.
-            # 안 남기면 다음 재시작 때 catch-up이 이걸 "놓친 정리"로 착각해서 불필요하게 재실행함.
-            now_kst_skipped = datetime.now(timezone.utc) + timedelta(hours=9)
-            await asyncio.to_thread(set_digest_sent_time, end_hour, now_kst_skipped.isoformat())
+            # 스킵도 "이번 회차는 정상적으로 처리했다"는 뜻이므로 기록해야 함.
+            # 안 남기면 _digest_loop가 이걸 "놓친 정리"로 착각해서 계속 재시도함.
+            await asyncio.to_thread(set_digest_sent_time, end_hour, slot_end_kst.isoformat())
             return
 
         # 요약본이 저장되어 있으면(대부분의 경우) 그걸 쓰고, 없으면(요약 기능이 꺼져있었거나
@@ -3270,7 +3273,7 @@ async def main():
 
         is_overnight = start_hour >= end_hour
         time_range = f"{start_hour:02d}:00~다음날 {end_hour:02d}:00" if is_overnight else f"{start_hour:02d}:00~{end_hour:02d}:00"
-        header = f"🗓 정리 ({time_range}, 총 {len(entry_lines)}건)"
+        header = f"🗓 정리 ({slot_end_kst:%m/%d} 발송분, {time_range}, 총 {len(entry_lines)}건)"
 
         # 텍스트(굵은 제목)와 HTML 파일 둘 다, 같은 블록 구조에서 함께 만듦
         classified_blocks = classify_digest_blocks(rebuilt_blocks) if rebuilt_blocks else []
@@ -3290,8 +3293,7 @@ async def main():
                 # 크래시가 나더라도, 이미 텍스트 요약은 받으신 상태이므로 재시작 시 catch-up이
                 # "안 보냈다"고 착각해서 중복 발송하는 일이 없도록 함. DB가 아닌 별도 파일에
                 # 저장(DB 손상/초기화와 무관하게 이 기록이 안전하게 남도록).
-                now_kst_sent = datetime.now(timezone.utc) + timedelta(hours=9)
-                await asyncio.to_thread(set_digest_sent_time, end_hour, now_kst_sent.isoformat())
+                await asyncio.to_thread(set_digest_sent_time, end_hour, slot_end_kst.isoformat())
 
             if classified_blocks:
                 vix_info = (quant_data or {}).get("VIX 공포지수")
@@ -3300,11 +3302,11 @@ async def main():
                     vix_value=vix_info["value"] if vix_info else None,
                     vix_change_pct=vix_info["change_pct"] if vix_info else None,
                 )
-                now_kst = datetime.now(timezone.utc) + timedelta(hours=9)
                 # end_hour(=이 정리를 보내는 트리거 시각)가 정오 이전이면 '오전'(예: 08시 발송,
-                # 야간치 정리), 이후면 '오후'(예: 18시 발송, 주간치 정리)로 구분
+                # 야간치 정리), 이후면 '오후'(예: 18시 발송, 주간치 정리)로 구분. 날짜는 실제
+                # 보낸 날이 아니라 회차 날짜(늦게 보내도 원래 회차 날짜로 남음).
                 ampm_label = "오전" if end_hour < 12 else "오후"
-                html_filename = f"{ampm_label}_정리_{now_kst.strftime('%Y%m%d')}.html"
+                html_filename = f"{ampm_label}_정리_{slot_end_kst.strftime('%Y%m%d')}.html"
                 html_msg_id = send_html_document(SUMMARY_CHAT, digest_html_doc, html_filename)
                 if html_msg_id:
                     log.info("정리(HTML 파일) 전송 완료")
@@ -3314,46 +3316,70 @@ async def main():
             sent_msg = await client.send_message(digest_entity, f"{header}\n\n{digest_clean}")
             sent_msg_id = sent_msg.id
             log.info("정리 전송 완료(유저봇)")
-            now_kst_sent = datetime.now(timezone.utc) + timedelta(hours=9)
-            await asyncio.to_thread(set_digest_sent_time, end_hour, now_kst_sent.isoformat())
+            await asyncio.to_thread(set_digest_sent_time, end_hour, slot_end_kst.isoformat())
 
-    async def _digest_loop(trigger_hour: int, start_hour: int, end_hour: int):
+    async def _digest_loop(start_hour: int, end_hour: int, superseding_hour: int):
+        """매일 end_hour 정각에 start_hour~end_hour 구간 정리를 보내는 스케줄러.
+
+        asyncio.sleep으로 몇 시간씩 한 번에 기다리면 안 됨: macOS가 잠자기에 들어간 동안엔 그
+        대기 시계(monotonic)가 멈춰서, 예정 시각을 몇 시간~며칠씩 넘겨버림(2026-10-09~12 정리가
+        전부 누락된 원인 — 맥북 덮개가 닫혀 Power Nap으로만 띄엄띄엄 깨어 있었음). 그래서
+        DIGEST_POLL_SECONDS마다 깨어나 실제 시계 기준으로 '아직 처리 안 된 가장 최근 회차'가
+        있는지 확인함. 재시작 직후 catch-up도 이 같은 로직이 처리함.
+
+        놓친 회차가 있어도, 그 뒤에 다음 정리(superseding_hour) 회차 시각이 이미 지났으면
+        내용이 낡았으므로 보내지 않고 처리된 것으로만 기록함 — 오전에 재시작하면 어제 오후
+        정리가 뒤늦게 나가던 문제 방지."""
         def _now_kst():
             return datetime.now(timezone.utc) + timedelta(hours=9)
 
-        # 재시작 시 catch-up: 서버가 꺼져있던 사이(크래시 등) 예정 시각을 놓쳤는지 확인해서,
-        # 놓쳤으면 즉시 한 번 재발송하고 정상 스케줄로 넘어감. 놓친 시각으로부터 5분의 여유를
-        # 둬서, 마침 트리거 시각 직전에 재시작된 경우 정상 스케줄과 겹쳐 중복 발송되는 걸 방지.
-        now_kst = _now_kst()
-        most_recent_trigger_kst = now_kst.replace(hour=trigger_hour, minute=0, second=0, microsecond=0)
-        if now_kst < most_recent_trigger_kst:
-            most_recent_trigger_kst -= timedelta(days=1)
-        last_sent_str = await asyncio.to_thread(get_digest_sent_time, trigger_hour)
-        last_sent = datetime.fromisoformat(last_sent_str) if last_sent_str else None
-        if (
-            now_kst - most_recent_trigger_kst > timedelta(minutes=5)
-            and (last_sent is None or last_sent < most_recent_trigger_kst)
-        ):
-            log.warning(
-                f"[정리 catch-up] {start_hour:02d}~{end_hour:02d}시 정리가 예정 시각"
-                f"({most_recent_trigger_kst.strftime('%Y-%m-%d %H:%M')})에 발송되지 않은 것으로 "
-                f"확인됨 → 지금 즉시 재발송 시도"
-            )
-            try:
-                await _run_digest(start_hour, end_hour)
-            except Exception as e:
-                log.error(f"[정리 catch-up] 재발송 시도 중 오류: {e}")
-
+        label = f"{start_hour:02d}~{end_hour:02d}시"
+        attempt_slot, attempt_count, last_attempt = None, 0, None
+        announced_next = None
         while True:
             now_kst = _now_kst()
-            target_kst = now_kst.replace(hour=trigger_hour, minute=0, second=0, microsecond=0)
-            if now_kst >= target_kst:
-                target_kst += timedelta(days=1)
-            wait_seconds = (target_kst - now_kst).total_seconds()
-            log.info(f"다음 정리({start_hour:02d}~{end_hour:02d}시) 예정 시각까지 {wait_seconds / 3600:.1f}시간 대기")
-            await asyncio.sleep(max(wait_seconds, 1))
+            slot = now_kst.replace(hour=end_hour, minute=0, second=0, microsecond=0)
+            if now_kst < slot:
+                slot -= timedelta(days=1)
+            handled_str = await asyncio.to_thread(get_digest_sent_time, end_hour)
+            handled = datetime.fromisoformat(handled_str) if handled_str else None
+
+            if handled is not None and handled >= slot:
+                next_slot = slot + timedelta(days=1)
+                if announced_next != next_slot:
+                    log.info(f"다음 정리({label}) 예정 시각: {next_slot:%Y-%m-%d %H:%M}")
+                    announced_next = next_slot
+                await asyncio.sleep(DIGEST_POLL_SECONDS)
+                continue
+
+            if attempt_slot != slot:
+                attempt_slot, attempt_count, last_attempt = slot, 0, None
+            superseded_at = slot.replace(hour=superseding_hour)
+            if superseded_at <= slot:
+                superseded_at += timedelta(days=1)
+
+            if now_kst >= superseded_at:
+                log.warning(
+                    f"[정리] {label} 정리 {slot:%Y-%m-%d %H:%M} 회차를 놓쳤고 다음 정리 시각"
+                    f"({superseded_at:%m-%d %H:%M})도 이미 지나 내용이 낡았으므로 보내지 않고 건너뜀"
+                )
+                await asyncio.to_thread(set_digest_sent_time, end_hour, slot.isoformat())
+                continue
+            if attempt_count >= DIGEST_MAX_ATTEMPTS:
+                log.error(f"[정리] {label} 정리 {slot:%Y-%m-%d %H:%M} 회차 {attempt_count}번 실패 → 포기")
+                await asyncio.to_thread(set_digest_sent_time, end_hour, slot.isoformat())
+                continue
+            if last_attempt is not None and now_kst - last_attempt < DIGEST_RETRY_INTERVAL:
+                await asyncio.sleep(DIGEST_POLL_SECONDS)
+                continue
+
+            delay = now_kst - slot
+            if delay > timedelta(minutes=5):
+                log.warning(f"[정리] {label} 정리 {slot:%Y-%m-%d %H:%M} 회차를 {delay}만큼 늦게 발송함")
+            attempt_count += 1
+            last_attempt = now_kst
             try:
-                await _run_digest(start_hour, end_hour)
+                await _run_digest(start_hour, end_hour, slot)
             except Exception as e:
                 log.error(f"정리 생성/전송 중 오류: {e}")
 
@@ -3486,10 +3512,10 @@ async def main():
     log.info(f"processed_message_ids 정리 루프 활성화됨 ({PROCESSED_ID_RETENTION_HOURS}시간 이상 지난 항목 매시간 정리)")
 
     if DAILY_DIGEST_ENABLED:
-        # 1) 06시~18시 구간 정리, 18시에 전송
-        _spawn(_digest_loop(DAILY_DIGEST_HOUR, DAILY_DIGEST_START_HOUR, DAILY_DIGEST_HOUR))
-        # 2) 18시~다음날 08시(야간) 구간 정리, 08시에 전송
-        _spawn(_digest_loop(NIGHT_DIGEST_END_HOUR, DAILY_DIGEST_HOUR, NIGHT_DIGEST_END_HOUR))
+        # 1) 06시~18시 구간 정리, 18시에 전송 (놓쳤는데 다음날 08시가 지났으면 건너뜀)
+        _spawn(_digest_loop(DAILY_DIGEST_START_HOUR, DAILY_DIGEST_HOUR, NIGHT_DIGEST_END_HOUR))
+        # 2) 18시~다음날 08시(야간) 구간 정리, 08시에 전송 (놓쳤는데 18시가 지났으면 건너뜀)
+        _spawn(_digest_loop(DAILY_DIGEST_HOUR, NIGHT_DIGEST_END_HOUR, DAILY_DIGEST_HOUR))
         log.info(
             f"정리 기능 활성화됨 → 매일 {DAILY_DIGEST_HOUR:02d}:00에 "
             f"{DAILY_DIGEST_START_HOUR:02d}:00~{DAILY_DIGEST_HOUR:02d}:00 구간, "

@@ -1,121 +1,90 @@
-# Telegram Stock Dedup Bot
+# 텔레그램 주식 정보 중복 제거 봇
 
-여러 텔레그램 채팅방에 올라오는 주식 정보 메시지 중 완전히 동일한 것과 표현만
-다르고 내용이 같은 것을 걸러내고, 새로운 정보만 지정한 채널로 모아주는 텔레그램
-유저봇입니다.
+여러 텔레그램 채널에 올라오는 주식·투자 메시지 중 완전히 같은 것과 표현만 다르고 내용이 같은 것을
+걸러내고, 새 정보만 요약을 붙여 내 채널로 모아 주는 텔레그램 유저봇입니다. 하루 두 번(08시·18시)
+금리·에너지 중심의 시장 정리도 보냅니다.
 
-> **이 저장소에 대해**
-> 이 repo는 **비공개 원본의 공개 미러**입니다. 실제 운영 코드는 private repo로
-> 유지되고, 그쪽 `main` 브랜치에 push가 들어가면 macOS ARM64 self-hosted runner
-> 한 대가 GitHub Actions로 `rsync` 배포 → 의존성 설치 → 문법 체크 →
-> `launchctl`로 서비스 재시작까지 수행합니다. 실제 배포에 쓰는 워크플로 파일은
-> [`docs/deploy.yml.reference`](docs/deploy.yml.reference)에 참고용으로만
-> 넣어뒀고, 이 미러에는 `.github/workflows/`로 올리지 않아 실행되지 않습니다.
-> 이 repo는 코드와 문서만 동기화합니다.
+- 원본은 비공개 저장소이고, 공개 미러(`telegram-bot-mirror`)에는 보안 값(토큰·키·채팅방 ID 등)을
+  뺀 코드·문서를 `mirror-push.sh`로 동기화합니다. 미러의 배포 워크플로는 `docs/deploy.yml.reference`
+  (참고용, 실행 안 됨)입니다.
+- 인프라·코드·배포·클라우드 이전·AI 전환 검토: [`docs/봇-구성-안내.md`](docs/봇-구성-안내.md)
+- 에이전트 작업 규칙: [`AGENTS.md`](AGENTS.md)
 
 ---
 
-## 무엇을 하는 코드인가
+## 하는 일
 
-같은 정보가 여러 텔레그램 리서치/뉴스 채널에 거의 동시에 올라오는 경우가
-많습니다(같은 속보, 같은 실적 발표, 같은 기사에 대한 코멘트 등). 이 봇은 감시
-중인 채팅방들의 새 메시지를 실시간으로 받아서, 이미 전달한 정보와 같은
-내용이면 스킵하고 새 정보만 결과 채널로 forward합니다.
+1. **실시간 전달**: 감시 채널의 새 메시지를 받아 잡담 필터 → 중복 판단 → AI 요약 → 요약 채널로 전송.
+2. **일간 정리**: 08시(밤사이)·18시(아시아 장중) 회차마다 모은 메시지와 시세·금리 데이터를 AI가
+   "Daily Market Strategist" 관점으로 정리해 텍스트와 HTML 파일로 전송.
+3. **자동 복구**: 재시작하면 꺼져 있던 동안의 메시지를 다시 처리하고, 밀린 정리 회차를 보냄.
 
-## 중복 판정 파이프라인
+## 중복 판단 순서 (`is_duplicate()`)
 
-`is_duplicate()` 하나에 다 들어있는 로직인데, 단계별로 보면 이렇습니다.
+1. **완전히 같은 글**: 공백·링크를 정리한 텍스트의 해시가 같으면 버림.
+2. **같은 링크**: 같은 기사 링크이고 문구도 충분히 비슷하면 버림.
+3. **"절대 다른 정보" 필터**: 국가, DART 종목코드, 브리핑 날짜, 국채 만기, 수출 품목, 리포트 담당자,
+   해시태그 등이 다르면 유사도 계산 없이 새 정보로 확정.
+4. **키워드·숫자 유사도**: `0.7 × 키워드 + 0.3 × 숫자`.
+   - `KEYWORD_THRESHOLD_HIGH`(기본 0.6) 이상 → 버림
+   - `KEYWORD_THRESHOLD_LOW`(기본 0.25)~HIGH → AI에게 "같은 정보냐" 확인
+     (점수 높은 순으로 최대 `MAX_LLM_DUP_CANDIDATES`개)
+   - LOW 미만 → 새 정보
 
-1. **완전 동일 메시지** — 텍스트를 정규화(공백/링크 제거, 소문자화)한 뒤 해시로
-   비교. 이미 본 해시면 즉시 스킵.
-2. **같은 링크 공유** — 메시지에서 URL을 추출해 최근 기록과 비교. 같은 기사
-   링크를 공유하면 문구가 완전히 달라도("또 시작" vs "[속보] ...") 유사도가
-   충분히 높은 경우 즉시 중복으로 판단. 링크는 같은데 문구 유사도가 낮으면
-   "같은 기사에 대한 다른 의견"일 수 있어 3번으로 넘김.
-3. **"절대 다른 정보" 예외 필터** — 키워드/숫자 유사도만 보면 오탐이 나는
-   케이스들을 먼저 걸러냅니다. 국가(중국 CPI vs 독일 수출), DART 종목코드,
-   브리핑 날짜, 국채 만기, 수출 품목, 리포트 담당자 태그, 해시태그 등 11종의
-   속성이 있고, 두 메시지가 형식은 똑같아도 이 중 하나라도 다르면 유사도
-   계산 없이 바로 "다른 정보"로 확정합니다. 반복되는 템플릿 리포트(정기
-   브리핑, 실적 프레스 등)에서 실제로 겪은 오탐들을 하나씩 막으면서 늘어난
-   목록입니다.
-4. **키워드/숫자 유사도 → 애매하면 LLM 최종 판단** — 위 필터를 통과한 후보들의
-   키워드 자카드 유사도 + 숫자(가격 등) 유사도를 계산합니다.
-   - `KEYWORD_THRESHOLD_HIGH`(기본 0.6) 이상이면 LLM 호출 없이 바로 중복 확정
-   - `KEYWORD_THRESHOLD_LOW`(기본 0.25)~`HIGH` 사이면 애매한 구간 → LLM에게
-     "같은 정보냐" 최종 확인. 점수 높은 순으로 최대
-     `MAX_LLM_DUP_CANDIDATES`개까지 순서대로 물어봄
-   - `LOW` 미만이면 새 정보로 통과
+대부분은 1~3단계에서 AI 호출 없이 걸러지고, 애매한 경우에만 AI를 씁니다.
 
-LLM 호출을 자동 확정 가능한 구간 밖으로 최대한 밀어낸 게 이 설계의 핵심입니다.
-대부분의 메시지는 1~3단계에서 API 호출 없이 걸러지고, 진짜 애매한 경우에만
-비용을 씁니다.
+## 일간 정리
 
-## LLM 호출: 3사 폴백 + Gemini 키 로테이션
+- **금리축**: 경기·물가 → Fed → 미 국채(명목/실질/BEI) → 달러 → 증시. 10년물 변화가 BEI 주도인지
+  실질금리 주도인지 구분.
+- **에너지축**: 원유 → 정제마진 → 천연가스·LNG → 전력 → 물가 → 장기금리 → 기업 마진 → 섹터.
+- **2027 에너지 강세 가설**은 매일 검증·반증하는 가설로 다루고, 반대 데이터도 같은 비중으로 다룸.
+- **정량 데이터**: yfinance(지수·VIX·SOX·DXY·원달러·Brent·WTI·Henry Hub·TTF, 3-2-1 크랙 스프레드
+  계산), FRED(10Y·2Y·10Y 실질금리·BEI, 기준일 표기), 18시 회차엔 아시아 지수 추가.
+- **스케줄러**: 30초마다 실제 시계로 미처리 회차를 확인(맥이 잠들었다 깨도 바로 발송). 다음 회차가
+  지난 낡은 회차는 건너뛰고, 실패하면 10분 간격 3회 재시도.
 
-`LLM_PROVIDER`로 1차 provider(anthropic/openai/gemini)를 고르고,
-`LLM_FALLBACK_PROVIDERS`로 실패 시 순서대로 넘어갈 provider를 지정할 수
-있습니다. Gemini 호출이 분당 요청 제한에 걸리면 `GEMINI_API_KEYS`에 등록된
-키들을 순환 사용해 요청을 계속 처리하고, 키별로 남은 쿨다운을 추적해 전부
-쿨다운 중이면 `GEMINI_MAX_COOLDOWN_WAIT`만큼만 기다립니다.
+## AI 호출
 
-## 그 외 기능
+- `LLM_PROVIDER`(anthropic/openai/gemini)로 1차 제공자를 고르고 `LLM_FALLBACK_PROVIDERS`로 대체 순서 지정.
+- 운영은 Gemini. `GEMINI_API_KEYS`의 키를 돌려 쓰며 키별 분당 사용량을 추적하고, 모두 쉬는 중이면
+  `GEMINI_MAX_COOLDOWN_WAIT`(기본 5초)까지만 기다린 뒤 "새 정보"로 안전하게 처리.
 
-- **일간 정리(digest)**: `DAILY_DIGEST_ENABLED=true`면 08시/18시에 금리(명목/
-  실질/기대인플레이션), 에너지(원유/정제마진/천연가스), AI·전력수요, 지정학,
-  자금흐름을 하나의 매크로 프레임으로 엮은 브리핑을 텍스트+HTML로 보냄
-- **잡담 필터**: 주식과 무관한 메시지를 LLM으로 걸러냄 (`CHITCHAT_FILTER_ENABLED`)
-- **텔레그램 업로드 용량 제한(413) 자동 폴백**: Bot API로 미디어 전송이 413으로
-  실패하면 유저봇 계정으로 대신 전송
+## 운영 구조
 
-## 배포 (원본 private repo 기준)
-
-```yaml
-runs-on: [self-hosted, macOS, ARM64, main]
+```
+운영 맥 ── LaunchDaemon(com.telegram-bot) ── run_bot.sh ── main.py
+   ▲
+   └─ self-hosted runner ◄── git push origin main (비공개 저장소)
+        rsync → venv 설치 → py_compile → launchctl 재시작
 ```
 
-`main` 브랜치 push → self-hosted runner가 `rsync`로 배포 → venv 재구성 →
-`py_compile`로 문법 체크 → `launchctl bootout/bootstrap/kickstart`로 LaunchDaemon
-재시작. 워크플로 전체는 [`docs/deploy.yml.reference`](docs/deploy.yml.reference)
-참고 (이 미러에서는 실행되지 않는 참고용 파일입니다).
+- 운영 폴더: `~/telegram-bot` (로컬 git 체크아웃 겸용, `~/Documents` 아래로 옮기지 않음)
+- 설정: `~/.config/telegram-bot/.env` (템플릿은 공개 미러의 `.env.example`)
+- 미러 동기화: `./mirror-push.sh`(미리보기) → `./mirror-push.sh --push`
+- `*.md` 문서만 바뀐 push는 배포·재시작하지 않음
+- 자세한 내용과 클라우드(Lightsail) 이전 검토는 [`docs/봇-구성-안내.md`](docs/봇-구성-안내.md)
 
-## 실제로 겪은 장애들 (커밋 히스토리 기준)
-
-- Gemini 키가 전부 쿨다운 상태일 때 `None`을 그대로 `raise`해서 죽던 버그
-- 예방적 재연결 로직이 `run_until_disconnected()`를 깨워버려 프로세스가
-  `exit 0`으로 조용히 종료되던 버그 (크래시가 아니라서 알아채기 어려웠음)
-- 재전송 큐 조회 중 DB 예외가 나면 재전송 루프 태스크 자체가 영구히 죽던 버그
-- Bot API 미디어 업로드가 용량 제한(413)으로 실패할 때 아예 전송이 안 되던
-  문제 → 유저봇 계정 자동 폴백으로 해결
-- 모든 DB 호출을 `asyncio.to_thread`로 위임해 이벤트 루프가 sqlite I/O로
-  멈추는 상황 제거
-
-## 알려진 한계
-
-- `main.py` 단일 파일, 4,149줄. 모듈 분리 없음
-- 테스트 없음. `py_compile` 문법 체크만 CI에 있음 (배포 워크플로 참고)
-- 텔레그램 "유저봇" 방식이라 본인 계정으로 자동화를 수행함 — ToS상 과도한
-  자동화는 계정 제한 위험이 있어 개인용으로만 사용 권장
-- 이미지만 있고 텍스트가 없는 메시지는 중복 판단 없이 항상 통과됨
-
----
-
-## 로컬에서 돌려보기
+## 처음 설치
 
 ```bash
-python -m venv venv
-source venv/bin/activate      # Windows는 venv\Scripts\activate
+python3 -m venv .venv
+. .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env
-# .env를 열어서 값 채우기 (필수 항목: TELEGRAM_API_ID/HASH, SOURCE_CHATS,
-# DIGEST_CHAT, 그리고 LLM_PROVIDER에 맞는 API 키)
-
-python main.py
+# ~/.config/telegram-bot/.env 작성 (필수: TELEGRAM_API_ID/HASH, SOURCE_CHATS, DIGEST_CHAT,
+# TELEGRAM_BOT_TOKEN, LLM_PROVIDER에 맞는 API 키)
+set -a; source ~/.config/telegram-bot/.env; set +a
+.venv/bin/python3 main.py
 ```
 
-최초 실행 시 전화번호와 텔레그램 인증 코드를 콘솔에 입력하면 세션 파일이
-생성되어 이후엔 자동 로그인됩니다.
+- 첫 실행 때 전화번호와 텔레그램 인증 코드를 입력하면 세션 파일이 생겨 이후 자동 로그인됩니다.
+- `TELEGRAM_API_ID`/`TELEGRAM_API_HASH`는 https://my.telegram.org → API development tools에서 발급.
+- 채널 ID 확인: `.venv/bin/python3 list_chats.py` (로컬 전용 스크립트)
 
-`TELEGRAM_API_ID` / `TELEGRAM_API_HASH`는 https://my.telegram.org 에서
-발급받습니다.
+## 알아둘 점
+
+- 유저봇은 내 계정으로 자동화합니다. 과도하게 쓰면 계정 제한 위험이 있어 개인용으로만 씁니다.
+- 세션 파일은 계정 접근 권한과 같습니다. 복사·공유하지 않습니다.
+- 맥이 잠들면 봇도 멈춥니다. 정리는 깨어나는 즉시 나갑니다.
+- `main.py` 한 파일(약 4,000줄)이고 자동 테스트는 없습니다. 배포 때 `py_compile` 문법 검사만 합니다.
