@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths-ignore:
-      - "README.md"
+      - "**.md"
       - ".gitignore"
 
 jobs:
@@ -32,6 +32,8 @@ jobs:
             --exclude '*.db-wal' \
             --exclude '*.sh' \
             --exclude '*.json' \
+            --exclude 'CLAUDE.md' \
+            --exclude 'list_chats.py' \
             telegram/ ~/telegram-bot/
 
       - name: Install Dependency
