@@ -41,6 +41,7 @@
 - **2027 에너지 강세 가설**은 매일 검증·반증하는 가설로 다루고, 반대 데이터도 같은 비중으로 다룸.
 - **정량 데이터**: yfinance(지수·VIX·SOX·DXY·원달러·Brent·WTI·Henry Hub·TTF, 3-2-1 크랙 스프레드
   계산), FRED(10Y·2Y·10Y 실질금리·BEI, 기준일 표기), 18시 회차엔 아시아 지수 추가.
+- **작성 AI**: Claude Code → Codex → Gemini 순(아래 "AI 호출").
 - **스케줄러**: 30초마다 실제 시계로 미처리 회차를 확인(맥이 잠들었다 깨도 바로 발송). 다음 회차가
   지난 낡은 회차는 건너뛰고, 실패하면 10분 간격 3회 재시도.
 
@@ -49,6 +50,10 @@
 - `LLM_PROVIDER`(anthropic/openai/gemini)로 1차 제공자를 고르고 `LLM_FALLBACK_PROVIDERS`로 대체 순서 지정.
 - 운영은 Gemini. `GEMINI_API_KEYS`의 키를 돌려 쓰며 키별 분당 사용량을 추적하고, 모두 쉬는 중이면
   `GEMINI_MAX_COOLDOWN_WAIT`(기본 5초)까지만 기다린 뒤 "새 정보"로 안전하게 처리.
+- **08시·18시 정리만** 구독형 CLI로 먼저 작성: Claude Code(`claude -p`) → Codex(`codex exec`) → 둘 다
+  실패하면 위 `LLM_PROVIDER`(Gemini). 순서는 `DIGEST_CLI_PROVIDERS`(기본 `claude,codex`). 정리 한 번에
+  1~2분 걸림. 서비스(LaunchDaemon)에서는 키체인을 못 읽으므로 `claude setup-token` 토큰을
+  `.env`의 `CLAUDE_CODE_OAUTH_TOKEN`에 둠. 메시지별 호출은 횟수가 많아 Gemini 그대로.
 
 ## 운영 구조
 
