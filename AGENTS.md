@@ -33,7 +33,9 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
   해시·전화번호·감시 채널).
 - `mirror-push.sh`는 `.env`에서 그 값을 읽어 가리고, 보안 값 모양이 남으면 push하지 않는다.
   새 보안 값은 `.env`에 두거나 스크립트 검사 패턴에 추가한다.
-- 미러 제외 파일: `REQUESTS.md`, `SYNC.md`(운영 맥락), `CLAUDE.md`(git 밖).
+- `REQUESTS.md`도 보안 값을 가려서 미러에 올린다. 공개하면 안 되는 항목은 제목 줄에
+  `<!-- mirror:skip -->`를 붙이면 그 항목 전체가 빠진다.
+- 미러 제외 파일: `SYNC.md`(운영 맥락), `CLAUDE.md`(git 밖).
 
 ## 변경 후 배포
 

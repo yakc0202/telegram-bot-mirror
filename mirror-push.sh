@@ -25,8 +25,7 @@ from pathlib import Path
 src, mirror, env_file = map(Path, sys.argv[1:])
 
 # 공개하지 않는 파일
-EXCLUDE = {'REQUESTS.md',  # 요청 기록(운영 맥락)
-           'SYNC.md'}      # 지금 상태 요약(운영 맥락)
+EXCLUDE = {'SYNC.md'}  # 지금 상태 요약(운영 맥락)
 # 경로를 바꿔 내보내는 파일: 미러에서 워크플로가 실행되지 않게 참고용으로만 둔다
 RENAME = {'.github/workflows/deploy.yml': 'docs/deploy.yml.reference'}
 # 미러에만 있는 파일(지우지 않음)
@@ -48,6 +47,20 @@ for line in env_file.read_text().splitlines():
         if len(v) >= 5:
             pairs.append((v, f'<{name}>'))
 pairs.sort(key=lambda p: -len(p[0]))  # 긴 값부터 가림
+pairs.append((str(Path.home()), '~'))  # 맥 계정 이름이 든 홈 경로
+
+
+def public_requests(text):
+    # REQUESTS.md: '<!-- mirror:skip -->'가 붙은 줄을 빼고, 제목 줄(#)에 붙어 있으면 다음 제목 전까지
+    # 그 항목 전체를 뺀다
+    out, skip = [], False
+    for line in text.splitlines(keepends=True):
+        if line.startswith('#'):
+            skip = 'mirror:skip' in line
+        if skip or 'mirror:skip' in line:
+            continue
+        out.append(line)
+    return ''.join(out)
 
 generic = [
     r'\b[0-9]{8,10}:[A-Za-z0-9_-]{35}\b',   # 텔레그램 봇 토큰
@@ -74,6 +87,8 @@ for name, out in targets.items():
     dst = mirror / out
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src / name, dst)
+    if name == 'REQUESTS.md':
+        dst.write_text(public_requests(dst.read_text(encoding='utf-8')), encoding='utf-8')
     data = dst.read_bytes()
     try:
         text = data.decode('utf-8')
