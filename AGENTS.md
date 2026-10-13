@@ -35,7 +35,7 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
   새 보안 값은 `.env`에 두거나 스크립트 검사 패턴에 추가한다.
 - `REQUESTS.md`도 보안 값을 가려서 미러에 올린다. 공개하면 안 되는 항목은 제목 줄에
   `<!-- mirror:skip -->`를 붙이면 그 항목 전체가 빠진다.
-- 미러 제외 파일: `SYNC.md`(운영 맥락), `CLAUDE.md`(git 밖).
+- 미러 제외 파일: `SYNC.md`(운영 맥락).
 
 ## 변경 후 배포
 
@@ -53,4 +53,122 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
   (`rsync --delete`가 지운다).
 - 로컬 `git log`가 비정상적으로 짧으면 `git fetch --unshallow origin main`으로 확인하고,
   복구용 `git reset --hard origin/main`은 사용자 확인 후 실행한다.
-- `CLAUDE.md`는 로컬 전용(`.gitignore`)이며 맨 위 `@AGENTS.md`로 이 파일을 불러온다.
+- `CLAUDE.md`는 `@AGENTS.md` 한 줄만 둔다. 규칙과 개발 맥락은 모두 이 파일에 쓴다
+  (Claude Code·Codex 공통).
+
+## 개발 맥락
+
+### 개요
+
+- Telethon 유저봇이 `SOURCE_CHATS`를 감시해 주식·투자 정보를 중복 제거하고 요약해
+  요약 채널(`DIGEST_CHAT`)로 보낸다. 08시/18시 정량 데이터 + 금리·에너지 매크로 정리는 정리 채널
+  (`SUMMARY_CHAT`)로 보낸다.
+- 코드: `main.py`. 실행: LaunchDaemon `/Library/LaunchDaemons/com.telegram-bot.plist` →
+  `run_bot.sh`. 배포: push → self-hosted Actions(`.github/workflows/deploy.yml`).
+- 흐름: `handler()` → 앨범(grouped_id) 2초 디바운스 → `process_event()` → 잡담 필터
+  (STOCK/CHITCHAT/OPINION) → 중복 판단 → 요약 → 전송. 미디어 전송 실패는 30초마다 재시도.
+  스티커·투표는 알림 없이 무시.
+
+### 중복 판단
+
+- 순서: 해시 → `similarity_score()`(0.7×키워드 + 0.3×숫자) → 애매하면 LLM
+  (`ask_llm_same_info`).
+- 새 오탐을 고치기 전에 `extract_*`, `STOPWORDS`, LLM 프롬프트에 비슷한 처리가 있는지 먼저
+  본다. 같은 유형이 채널마다 다른 모양으로 반복된다.
+- 숫자 비교: `NUMBER_MATCH_TOLERANCE` 0.1%. 1900~2100(연도)와 소수점 없는 1~31
+  (`_looks_like_calendar_number`)은 제외. 키워드 점수 < `MIN_KW_SCORE_FOR_NUMBER_BOOST`(0.15)면
+  숫자 기여 무시.
+- 반복 보일러플레이트(증권사 앱 안내, 세션 시점 단어 등)는 `STOPWORDS`에 추가한다.
+- 정형 표·반복 데이터는 구분 키를 추출해 다르면 제외: `extract_bond_table_type()`(국채 만기),
+  `extract_export_data_product()`(수출 품목).
+- LLM 프롬프트 원칙: 핵심 주체가 다르면 DIFFERENT(최우선). 우연히 같은 작은 정수는 근거가
+  아니다. 식별 정보(시각·수치) 없는 정형 알림은 DIFFERENT. 배경설명 추가는 SAME, 새 수치
+  전망(PER·연도별 이익 등) 추가는 DIFFERENT.
+
+### 메시지 포맷
+
+- 인용블럭(`<blockquote>`) 사용, 코드블록 아님.
+- 4096자 초과는 `(1/N)` 형식으로 분할 전송(캡션 포함 번호 통일).
+- 실제 첨부 사진 판정은 `has_real_photo()`(`MessageMediaPhoto`)로 한다. 링크 미리보기는 사진이
+  아니다.
+- 정리의 섹션 간 빈 줄은 코드(`rebuilt_blocks`)가 재구성한다.
+
+### 08시/18시 정리 (`_run_digest`)
+
+- 역할: "Daily Market Strategist". 금리축(경기·물가 → Fed → 명목/실질/BEI → 달러 → 증시)과
+  에너지축(원유 → 정제마진 → 가스·LNG → 전력 → 물가 → BEI → 장기금리 → 마진 → 섹터)을 연결
+  해석한다. 10년물 변화는 BEI 주도인지 실질금리 주도인지 구분한다.
+- 2027 에너지 강세는 매일 검증·반증할 가설이다. 반대 데이터도 같은 비중으로 다룬다.
+- 디커플링 점검: 유가가 크게 움직였는데 금리가 무반응이면 원인(지표 대기/지정학 노이즈)을
+  구분하고 대신 집중하는 지표를 짚는다(🔗 섹션).
+- `digest_time`: `morning`(08시)과 `evening`(18시)은 다른 포맷. 조건부 섹션(AI·전력 Chain /
+  시장 괴리 체크 / 2차 인플레이션 Watch)은 이슈가 없으면 제목째 생략.
+- `classify_digest_blocks`/`render_digest_html`은 제목 문자열이 아니라 이모지 프리픽스
+  (🌡️⚡🔗🔀🌐🌾➡️)로 섹션을 분류한다.
+- 실적 발표/리뷰 섹션은 없다. 필요하면 git 히스토리에서 복원.
+- 정량: `fetch_market_quant_data()`(yfinance: 지수·VIX·SOX·DXY·KRW·Brent·WTI·NG·TTF·RB·HO),
+  `fetch_rates_quant_data()`(FRED `fredgraph.csv`: DGS10·DGS2·DFII10·T10YIE, 값마다 기준일
+  표기), `compute_crack_spread_321()`(RB·HO는 ×42, 원자재 값은 노출 안 함),
+  `fetch_asia_quant_data()`(evening만).
+- 자동 소스가 없는 지표(JKM, EU 가스저장률, OPEC+ 여유생산 등)는 텔레그램 언급이 있을 때만
+  다루고 수치를 만들지 않는다.
+- 작성 AI: `call_digest_llm` — `DIGEST_CLI_PROVIDERS`(기본 `claude,codex`) 순으로 `claude -p`/
+  `codex exec`를 시도하고 전부 실패하면 `call_llm`(Gemini). 서비스에서 Claude는 `.env`의
+  `CLAUDE_CODE_OAUTH_TOKEN`으로 로그인한다. 메시지별 호출은 `call_llm` 그대로.
+- 텍스트와 HTML(`render_digest_html`, `오전/오후_정리_YYYYMMDD.html`)을 같이 보낸다.
+
+### 정리 스케줄러 (`_digest_loop`)
+
+- 긴 `asyncio.sleep`으로 예약 시각을 기다리지 않는다. macOS 잠자기 중에는 그 시계가 멈춘다.
+  `DIGEST_POLL_SECONDS`(30초)마다 실제 시계로 미처리 회차를 확인한다(재시작 catch-up 포함).
+- `digest_sent_state.json`에는 처리한 회차 시각을 기록한다(스킵 포함). 텍스트 전송 직후,
+  HTML 전송 전에 기록한다. 원자적 쓰기, SQLite와 분리.
+- 구간·헤더·파일명 날짜는 회차 기준(`_kst_slot_bounds`)으로 잡는다. '지금' 기준이 아니다.
+- 다음 회차 시각이 이미 지난 낡은 회차는 보내지 않고 기록만 한다.
+- 실패 시 `DIGEST_RETRY_INTERVAL`(10분) 간격 `DIGEST_MAX_ATTEMPTS`(3회).
+- 맥이 잠들면 봇도 멈춘다. 정리는 깨어나는 즉시 나간다.
+
+### 메시지 catch-up (`_catch_up_missed_messages`)
+
+- 채널별 `last_processed_id` 워터마크. 채널 ID는 `client.get_peer_id(entity)`로 정규화한다
+  (`-100` 접두어, `event.chat_id`와 일치).
+- 앨범은 마지막 장 ID까지 워터마크에 저장한다.
+- 워터마크 없는 채널은 현재 시점부터 추적한다.
+- 채널 ID가 의심되면 `list_chats.py`로 실제 타이틀을 확인:
+  `set -a; source ~/.config/telegram-bot/.env; set +a; .venv/bin/python3 list_chats.py`
+
+### Gemini 속도 제한
+
+- `GEMINI_API_KEYS` 라운드로빈(가용성 폴백 목적), 키별 1분 사용량 추적(`GEMINI_PER_KEY_RPM`, 기본 12).
+- 429를 받으면 `_mark_gemini_key_exhausted`.
+- `is_duplicate()`는 `llm_processing_lock`을 쥐고 실행되므로 대기는
+  `GEMINI_MAX_COOLDOWN_WAIT`(기본 5초)까지만. 넘으면 실패 처리(→ "다른 정보").
+
+### SQLite
+
+- `text_factory`는 `errors="replace"`.
+- `get_db()`에서 `PRAGMA integrity_check`, 손상 시 `.corrupted-YYYYMMDDHHMMSS`로 백업 후 새 DB.
+- `set_state`/`get_state`/`save_entry_to_db`는 런타임 손상 시 재연결 후 재시도
+  (`_invalidate_db_connection_on_corruption`).
+
+### 운영 (macOS)
+
+- LaunchDaemon(`UserName` 지정)으로 실행한다. LaunchAgent는 GUI 세션에 묶인다.
+- 이 환경의 Bash·`!`에서는 `sudo` 비밀번호를 못 받는다. plist 수정·launchctl은
+  `osascript -e 'do shell script "..." with administrator privileges'`로 한다.
+- sudoers는 러너 계정에 `launchctl bootout/bootstrap/kickstart`(system 도메인)만 NOPASSWD.
+- 크래시 리포터 대화상자 끄기: `defaults write com.apple.CrashReporter DialogType none`.
+- `run_bot.sh`(git 밖)는 `.venv/bin/python3`를 쓴다. venv가 없으면 종료, 알림 쿨다운 60초.
+- 러너 체크아웃: `~/github-action-runners-1/_work/telegram-bot/telegram-bot/telegram` →
+  rsync `--delete`로 `~/telegram-bot`. `.git`·로컬 전용 파일은 `--exclude`.
+- 환경변수: `~/.config/telegram-bot/.env`(템플릿은 공개 미러의 `.env.example`). 주요 튜닝 값:
+  `DEDUP_WINDOW_MINUTES`, `THRESHOLD_HIGH/LOW`, `MIN_KEYWORDS_FOR_AUTO_DUP`,
+  `MAX_LLM_DUP_CANDIDATES`, `MAX_AUTO_DUP_SIZE_RATIO`, `NUMBER_MATCH_TOLERANCE`,
+  `GEMINI_PER_KEY_RPM`, `GEMINI_MAX_COOLDOWN_WAIT`, `LLM_MAX_CALLS_PER_WINDOW`,
+  `DAILY_DIGEST_HOUR`(18), `NIGHT_DIGEST_END_HOUR`(8), `DB_PATH`, `SESSION_PATH`,
+  `DIGEST_SENT_STATE_PATH`.
+- `stderr.log`에는 봇 토큰이 평문으로 찍힐 수 있다. 로그를 공유하거나 옮기지 않는다.
+
+### 작업 방식
+
+- 코드 수정 후 `python3 -m py_compile main.py` + 실제 재현 데이터로 테스트.

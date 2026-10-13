@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths-ignore:
       - "**.md"
+      - "mirror-push.sh"
       - ".gitignore"
 
 jobs:
@@ -32,7 +33,6 @@ jobs:
             --exclude '*.db-wal' \
             --exclude '*.sh' \
             --exclude '*.json' \
-            --exclude 'CLAUDE.md' \
             --exclude 'list_chats.py' \
             telegram/ ~/telegram-bot/
 

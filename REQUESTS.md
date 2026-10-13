@@ -435,3 +435,17 @@
   → `~` 치환을 추가. `.env` 값(감시 채널 ID 등)은 기존대로 `<이름>`으로 가려짐(검사 통과, 가린 곳
   REQUESTS 2곳). `AGENTS.md` 미러 규칙, 이 파일 상단 규칙, `docs/봇-구성-안내.md` 표 갱신.
   미러 제외는 이제 `SYNC.md`, `CLAUDE.md`(git 밖)만.
+
+### 2026-10-13 CLAUDE.md 내용을 AGENTS.md로 옮기고 CLAUDE.md는 @AGENTS.md만
+- 상태: 완료
+- 처리: "claude.md에 있는 것을 agents.md로 옮기고 @agents.md만 남기기, claude.md push, mirror에도.
+  mirror에 agents가 들어가 있는지? 보안에 안 걸릴지?" 요청.
+  - `AGENTS.md`에 "## 개발 맥락"으로 기존 `CLAUDE.md` 기술 맥락 전부 이동(정리 채널은
+    `SUMMARY_CHAT`, 요약 채널은 `DIGEST_CHAT`이라는 구분과 정리 작성 AI 순서 추가).
+  - `CLAUDE.md`는 `@AGENTS.md` 한 줄로 바꾸고 git에 추가(`.gitignore`에서 제거, `deploy.yml`
+    rsync `--exclude 'CLAUDE.md'` 제거). 이제 Codex·다른 맥도 같은 맥락을 봄.
+  - `deploy.yml` `paths-ignore`에 `mirror-push.sh` 추가(스크립트만 바뀐 push는 재시작 안 함).
+    이 push는 `deploy.yml` 변경으로 봇이 한 번 재시작됨.
+  - 미러: `AGENTS.md`는 10/13부터 미러에 있음. 이번에 `CLAUDE.md`도 포함. 보안 검사 통과
+    (토큰·키·채팅방 ID 없음, 경로는 `~` 표기). 공개되는 것은 운영 구조 설명(서비스 이름, 러너
+    경로, sudoers에 launchctl 3개만 허용 등) 수준이며 `docs/봇-구성-안내.md`에 이미 공개된 내용과 같음.
