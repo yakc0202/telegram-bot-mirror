@@ -6,5 +6,4 @@ digest_sent_state.json
 reviewed_earnings_state.json
 venv/
 .DS_STORE
-CLAUDE.md
 list_chats.py
