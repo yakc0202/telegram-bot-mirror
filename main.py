@@ -27,6 +27,8 @@ import hashlib
 import asyncio
 import logging
 import tempfile
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Optional
 from datetime import datetime, timedelta, timezone
@@ -211,6 +213,15 @@ DAILY_DIGEST_HOUR = int(os.environ.get("DAILY_DIGEST_HOUR", 18))
 # 야간 정리: DAILY_DIGEST_HOUR(18시)부터 다음날 이 시각까지 모아서, 이 시각에 전송.
 # DAILY_DIGEST_ENABLED가 켜져 있으면 이것도 같이 켜짐 (같은 on/off 스위치 공유).
 NIGHT_DIGEST_END_HOUR = int(os.environ.get("NIGHT_DIGEST_END_HOUR", 8))
+# 08시/18시 정리만 구독형 CLI(Codex·Claude Code)로 먼저 생성하고, 전부 실패하면 call_llm(Gemini 등)으로
+# 폴백. 메시지별 호출(중복 확인·요약·필터)은 호출 수가 많고 CLI는 호출마다 수 초씩 걸려 그대로 call_llm.
+# 빈 값이면 CLI를 쓰지 않음.
+DIGEST_CLI_PROVIDERS = [
+    p.strip().lower() for p in os.environ.get("DIGEST_CLI_PROVIDERS", "claude,codex").split(",") if p.strip()
+]
+DIGEST_CLI_TIMEOUT = int(os.environ.get("DIGEST_CLI_TIMEOUT", 420))
+DIGEST_CLAUDE_MODEL = os.environ.get("DIGEST_CLAUDE_MODEL", "").strip()
+DIGEST_CODEX_MODEL = os.environ.get("DIGEST_CODEX_MODEL", "").strip()
 # 정리 스케줄러가 실제 시계를 확인하는 주기(초) — 짧아야 맥이 잠들었다 깬 직후 바로 발송됨
 DIGEST_POLL_SECONDS = 30
 # 정리 생성/전송이 실패했을 때 같은 회차를 다시 시도하는 간격과 최대 시도 횟수
@@ -1344,6 +1355,75 @@ def call_llm(prompt: str, max_tokens: int) -> Optional[str]:
     return None
 
 
+def _cli_bin(name: str) -> str:
+    # LaunchDaemon의 PATH에는 /opt/homebrew/bin이 없어서 직접 찾아 줌
+    return shutil.which(name) or f"/opt/homebrew/bin/{name}"
+
+
+def _call_cli(provider: str, prompt: str) -> str:
+    """구독형 CLI를 대화창 없이 한 번 실행해 최종 답만 받음. 도구·세션 저장 없이, 빈 임시
+    폴더에서 실행해 저장소 파일을 읽지 않게 함."""
+    with tempfile.TemporaryDirectory(prefix="digest-cli-") as work:
+        if provider == "codex":
+            out_file = os.path.join(work, "answer.txt")
+            cmd = [_cli_bin("codex"), "exec", "--skip-git-repo-check", "--ephemeral",
+                   "-s", "read-only", "-o", out_file]
+            if DIGEST_CODEX_MODEL:
+                cmd += ["-m", DIGEST_CODEX_MODEL]
+            cmd.append("-")
+        elif provider == "claude":
+            cmd = [_cli_bin("claude"), "-p", "--output-format", "text", "--tools", "",
+                   "--no-session-persistence"]
+            if DIGEST_CLAUDE_MODEL:
+                cmd += ["--model", DIGEST_CLAUDE_MODEL]
+        else:
+            raise ValueError(f"알 수 없는 CLI provider: {provider}")
+        proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, cwd=work,
+                              timeout=DIGEST_CLI_TIMEOUT)
+        if proc.returncode != 0:
+            raise RuntimeError(f"exit {proc.returncode}: {(proc.stderr or proc.stdout).strip()[-300:]}")
+        answer = (Path(out_file).read_text(encoding="utf-8") if provider == "codex" else proc.stdout).strip()
+        if not answer:
+            raise RuntimeError("빈 응답")
+        return answer
+
+
+def check_digest_cli_auth() -> None:
+    """시작할 때 정리용 CLI 로그인 상태를 로그로 남김(서비스 환경에서 키체인을 못 읽는 경우 확인용).
+    모델 호출 없이 로그인 확인 명령만 실행."""
+    checks = {"claude": ["auth", "status"], "codex": ["login", "status"]}
+    for provider in DIGEST_CLI_PROVIDERS:
+        args = checks.get(provider)
+        if not args:
+            continue
+        try:
+            proc = subprocess.run([_cli_bin(provider)] + args, capture_output=True, text=True, timeout=30)
+            out = (proc.stdout + proc.stderr).strip()
+            ok = proc.returncode == 0 and ('"loggedIn": true' in out or "Logged in" in out)
+            if ok:
+                log.info(f"정리용 {provider} CLI 로그인 확인")
+            else:
+                log.warning(f"정리용 {provider} CLI 로그인 실패(정리는 다음 순서로 폴백): {out[-200:] or proc.returncode}")
+        except Exception as e:
+            log.warning(f"정리용 {provider} CLI 확인 실패: {e}")
+
+
+def call_digest_llm(prompt: str, max_tokens: int) -> Optional[str]:
+    """정리용: DIGEST_CLI_PROVIDERS 순서로 CLI를 시도하고, 전부 실패하면 call_llm으로 폴백."""
+    for provider in DIGEST_CLI_PROVIDERS:
+        started = time.monotonic()
+        try:
+            answer = _call_cli(provider, prompt)
+            # Codex는 웹을 찾아보고 [제목](주소) 마크다운 링크를 붙이기도 함 → 텔레그램에선 그대로
+            # 노출되므로 제목만 남김
+            answer = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r"\1", answer)
+            log.info(f"정리 생성: {provider} CLI 성공 ({time.monotonic() - started:.0f}초)")
+            return answer
+        except Exception as e:
+            log.warning(f"정리 생성: {provider} CLI 실패, 다음으로 넘어감: {str(e)[:300]}")
+    return call_llm(prompt, max_tokens=max_tokens)
+
+
 def ask_llm_same_info(text_a: str, text_b: str) -> bool:
     """LLM에게 두 메시지가 같은 정보를 담고 있는지 판단시킴.
     같은 종목/매매방향/가격대를 다루거나, 같은 기사를 링크했더라도 실질적으로
@@ -2151,7 +2231,7 @@ def generate_daily_digest(
         + quant_section
         + f"[오늘의 정보 모음]\n{entries_text}"
     )
-    return call_llm(prompt, max_tokens=3000) or None
+    return call_digest_llm(prompt, max_tokens=3000) or None
 
 
 INDICATOR_COUNTRY_RE = re.compile(r"국가\s*[:：]\s*([^\s*\n]+)")
@@ -3513,6 +3593,8 @@ async def main():
 
     if DAILY_DIGEST_ENABLED:
         # 1) 06시~18시 구간 정리, 18시에 전송 (놓쳤는데 다음날 08시가 지났으면 건너뜀)
+        if DIGEST_CLI_PROVIDERS:
+            _spawn(asyncio.to_thread(check_digest_cli_auth))
         _spawn(_digest_loop(DAILY_DIGEST_START_HOUR, DAILY_DIGEST_HOUR, NIGHT_DIGEST_END_HOUR))
         # 2) 18시~다음날 08시(야간) 구간 정리, 08시에 전송 (놓쳤는데 18시가 지났으면 건너뜀)
         _spawn(_digest_loop(DAILY_DIGEST_HOUR, NIGHT_DIGEST_END_HOUR, DAILY_DIGEST_HOUR))
