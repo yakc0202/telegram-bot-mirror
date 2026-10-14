@@ -1355,6 +1355,13 @@ def call_llm(prompt: str, max_tokens: int) -> Optional[str]:
     return None
 
 
+# claude -p의 기본 시스템 프롬프트(코딩 도우미)를 대신함 — 문체·분량이 코딩 답변처럼 바뀌지 않게
+DIGEST_CLI_SYSTEM_PROMPT = (
+    "너는 기관투자자 데스크용 데일리 마켓 노트를 쓰는 애널리스트야. 사용자 메시지의 형식·섹션·분량 "
+    "지시를 정확히 지키고, 결과 본문만 순수 텍스트로 출력해."
+)
+
+
 def _cli_bin(name: str) -> str:
     # LaunchDaemon의 PATH에는 /opt/homebrew/bin이 없어서 직접 찾아 줌
     return shutil.which(name) or f"/opt/homebrew/bin/{name}"
@@ -1373,7 +1380,7 @@ def _call_cli(provider: str, prompt: str) -> str:
             cmd.append("-")
         elif provider == "claude":
             cmd = [_cli_bin("claude"), "-p", "--output-format", "text", "--tools", "",
-                   "--no-session-persistence"]
+                   "--no-session-persistence", "--system-prompt", DIGEST_CLI_SYSTEM_PROMPT]
             if DIGEST_CLAUDE_MODEL:
                 cmd += ["--model", DIGEST_CLAUDE_MODEL]
         else:
@@ -2084,7 +2091,10 @@ DAILY_DIGEST_FORMAT_GUARD = (
     "우리 쪽에서 이미 <blockquote> 태그로 감싸서 인용블럭 형태로 전송하기 때문에, 네가 마크다운 "
     "기호나 코드펜스를 또 쓰면 별표(**)나 백틱(```)이 그대로 글자로 노출돼서 지저분해 보여. "
     "순수 텍스트로만, 백틱이나 별표 없이 작성해.\n"
-    "중복되거나 사소한 내용은 과감히 생략하고, 정말 중요한 것 위주로 압축해.\n\n"
+    "중복되거나 사소한 내용은 과감히 생략하고, 정말 중요한 것 위주로 압축해.\n"
+    "PART 2의 각 섹션 본문은 한 문단으로 이어서 써. '원유:', '가스:' 같은 소제목으로 줄을 나누지 "
+    "말고, '- ' 불릿은 PART 1 핵심 이슈와 '🌙 오늘 밤 미장 핵심 관전 포인트'의 이벤트 목록에만 써. "
+    "전체 분량 상한(약 1,800자)을 넘기지 마.\n\n"
 )
 
 DAILY_DIGEST_MORNING_PART1 = (
@@ -2758,7 +2768,7 @@ async def send_album_to_summary_chat(
             return None
 
 
-DIGEST_STRATEGY_PREFIXES = ("🌡️", "⚡", "🔗", "🔀", "🌐", "🌾", "➡️")
+DIGEST_STRATEGY_PREFIXES = ("🌡️", "⚡", "🔗", "🔀", "🌐", "🌾", "🌙", "➡️")
 
 
 def classify_digest_blocks(rebuilt_blocks: list) -> list:
@@ -3305,16 +3315,19 @@ async def main():
         # 블록을 나눠 빈 줄 1개로 재조립함 (LLM의 빈 줄 삽입 여부와 무관하게 항상 동일한 간격
         # 보장). PART 2 섹션들은 '-' 불릿이 아니라 일반 문단으로 이어지므로, 이 고정 헤더
         # 문자열을 별도로 인식해야 서로 다른 섹션이 한 덩어리로 뭉치는 걸 막을 수 있음.
-        DIGEST_SECTION_HEADERS = ("PART 1", "PART 2", "🌡️", "⚡", "🔗", "🔀", "🌐", "🌾", "➡️")
+        DIGEST_SECTION_HEADERS = ("PART 1", "PART 2", "🌡️", "⚡", "🔗", "🔀", "🌐", "🌾", "🌙", "➡️")
         lines = digest_clean.split("\n")
         rebuilt_blocks = []
         current_block: list = []
         started_bullet_block = False  # 현재 블록이 이미 '-' 불릿으로 시작된 상태인지
+        in_part2 = False  # PART 2의 '-' 불릿(🌙 이벤트 목록 등)은 새 이슈 블록이 아니라 섹션 본문
         for line in lines:
             stripped = line.strip()
             if not stripped:
                 continue
-            is_bullet = stripped.startswith("- ")
+            if stripped.startswith("PART 2"):
+                in_part2 = True
+            is_bullet = stripped.startswith("- ") and not in_part2
             is_insight = "💡" in stripped[:6]
             is_section_header = stripped.startswith(DIGEST_SECTION_HEADERS)
             starts_new_block = False

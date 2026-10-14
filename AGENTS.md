@@ -104,7 +104,10 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
 - `digest_time`: `morning`(08시)과 `evening`(18시)은 다른 포맷. 조건부 섹션(AI·전력 Chain /
   시장 괴리 체크 / 2차 인플레이션 Watch)은 이슈가 없으면 제목째 생략.
 - `classify_digest_blocks`/`render_digest_html`은 제목 문자열이 아니라 이모지 프리픽스
-  (🌡️⚡🔗🔀🌐🌾➡️)로 섹션을 분류한다.
+  (🌡️⚡🔗🔀🌐🌾🌙➡️)로 섹션을 분류한다. 새 섹션 이모지를 추가하면 `DIGEST_SECTION_HEADERS`와
+  `DIGEST_STRATEGY_PREFIXES` 둘 다에 넣는다.
+- PART 2 안의 '- ' 줄은 섹션 본문이다(새 이슈 블록으로 쪼개지 않음).
+- `claude -p`는 `--system-prompt`(`DIGEST_CLI_SYSTEM_PROMPT`)로 기본 코딩 도우미 프롬프트를 대체한다.
 - 실적 발표/리뷰 섹션은 없다. 필요하면 git 히스토리에서 복원.
 - 정량: `fetch_market_quant_data()`(yfinance: 지수·VIX·SOX·DXY·KRW·Brent·WTI·NG·TTF·RB·HO),
   `fetch_rates_quant_data()`(FRED `fredgraph.csv`: DGS10·DGS2·DFII10·T10YIE, 값마다 기준일
