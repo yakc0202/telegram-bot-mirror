@@ -118,6 +118,8 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
 - 작성 AI: `call_digest_llm` — `DIGEST_CLI_PROVIDERS`(기본 `claude,codex`) 순으로 `claude -p`/
   `codex exec`를 시도하고 전부 실패하면 `call_llm`(Gemini). 서비스에서 Claude는 `.env`의
   `CLAUDE_CODE_OAUTH_TOKEN`으로 로그인한다. 메시지별 호출은 `call_llm` 그대로.
+- 발송한 정리의 LLM 원문·최종본은 `DIGEST_ARCHIVE_DIR`(기본 `~/.local/state/telegram-bot/digests/`, 최근
+  60회차)에 남는다. 정리가 이상하다는 피드백은 이 파일부터 본다.
 - 텍스트와 HTML(`render_digest_html`, `오전/오후_정리_YYYYMMDD.html`)을 같이 보낸다.
 
 ### 정리 스케줄러 (`_digest_loop`)

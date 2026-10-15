@@ -1415,6 +1415,26 @@ def check_digest_cli_auth() -> None:
             log.warning(f"정리용 {provider} CLI 확인 실패: {e}")
 
 
+# 발송한 정리 원문·최종본 보관 폴더(진단용). 운영 폴더 밖(배포 rsync --delete 대상 아님),
+# ~/Documents 밖(서비스는 TCC 보호 폴더에 못 씀)
+DIGEST_ARCHIVE_DIR = Path(os.environ.get(
+    "DIGEST_ARCHIVE_DIR", Path.home() / ".local/state/telegram-bot/digests"))
+DIGEST_ARCHIVE_KEEP = 60  # 최근 회차 수만 보관
+
+
+def _archive_digest(slot_end_kst: datetime, raw: str, final: str) -> None:
+    try:
+        DIGEST_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        stem = slot_end_kst.strftime("%Y%m%d_%H%M")
+        (DIGEST_ARCHIVE_DIR / f"{stem}_raw.txt").write_text(raw, encoding="utf-8")
+        (DIGEST_ARCHIVE_DIR / f"{stem}_final.txt").write_text(final, encoding="utf-8")
+        for old in sorted(DIGEST_ARCHIVE_DIR.glob("*_raw.txt"))[:-DIGEST_ARCHIVE_KEEP]:
+            old.unlink(missing_ok=True)
+            (DIGEST_ARCHIVE_DIR / old.name.replace("_raw", "_final")).unlink(missing_ok=True)
+    except Exception as e:
+        log.warning(f"정리 보관 실패(발송에는 영향 없음): {e}")
+
+
 def call_digest_llm(prompt: str, max_tokens: int) -> Optional[str]:
     """정리용: DIGEST_CLI_PROVIDERS 순서로 CLI를 시도하고, 전부 실패하면 call_llm으로 폴백."""
     for provider in DIGEST_CLI_PROVIDERS:
@@ -2094,7 +2114,10 @@ DAILY_DIGEST_FORMAT_GUARD = (
     "중복되거나 사소한 내용은 과감히 생략하고, 정말 중요한 것 위주로 압축해.\n"
     "PART 2의 각 섹션 본문은 한 문단으로 이어서 써. '원유:', '가스:' 같은 소제목으로 줄을 나누지 "
     "말고, '- ' 불릿은 PART 1 핵심 이슈와 '🌙 오늘 밤 미장 핵심 관전 포인트'의 이벤트 목록에만 써. "
-    "전체 분량 상한(약 1,800자)을 넘기지 마.\n\n"
+    "전체 분량 상한(약 1,800자)을 넘기지 마.\n"
+    "문장 끝은 전부 '~습니다/~입니다' 체로 통일해('~다'·'~함' 체 금지). PART 1의 모든 이슈에는 "
+    "'💡 시장 영향: ' 줄을 빠짐없이 붙여. 데이터가 없거나 확인되지 않았다는 말은 꼭 필요한 곳에 "
+    "한 번만 짧게 쓰고, 같은 말을 섹션마다 반복하지 마.\n\n"
 )
 
 DAILY_DIGEST_MORNING_PART1 = (
@@ -3363,6 +3386,7 @@ async def main():
             if tonight_idx is not None and not rebuilt_blocks[tonight_idx].startswith("➡️"):
                 rebuilt_blocks[tonight_idx] = "➡️ " + rebuilt_blocks[tonight_idx]
         digest_clean = "\n\n".join(rebuilt_blocks) if rebuilt_blocks else digest_clean
+        await asyncio.to_thread(_archive_digest, slot_end_kst, digest, digest_clean)
 
         is_overnight = start_hour >= end_hour
         time_range = f"{start_hour:02d}:00~다음날 {end_hour:02d}:00" if is_overnight else f"{start_hour:02d}:00~{end_hour:02d}:00"
