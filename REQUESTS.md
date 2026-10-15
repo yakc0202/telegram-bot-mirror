@@ -490,3 +490,4 @@
   `DAILY_DIGEST_FORMAT_GUARD`에 "PART 2 섹션은 한 문단, 불릿은 PART 1과 🌙에만, 1,800자 상한" 추가.
   검증: 수정 전 Claude 출력도 이제 🌙가 '➡️ 🌙' 섹션으로 정상 분류(HTML highlight 카드), 새 출력은
   2,270자·'~습니다' 문체·섹션 구조 정상.
+
