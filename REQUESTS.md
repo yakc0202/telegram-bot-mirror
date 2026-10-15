@@ -491,3 +491,17 @@
   `DAILY_DIGEST_FORMAT_GUARD`에 "PART 2 섹션은 한 문단, 불릿은 PART 1과 🌙에만, 1,800자 상한" 추가.
   검증: 수정 전 Claude 출력도 이제 🌙가 '➡️ 🌙' 섹션으로 정상 분류(HTML highlight 카드), 새 출력은
   2,270자·'~습니다' 문체·섹션 구조 정상.
+
+### 2026-10-15 지금까지 한 일·git에 올라간 일을 경험분류에 정리
+- 상태: 완료
+- 처리: "이때까지 너가 한 일+git에 올라간 일 등 자세하게 경험분류에 써줘 — iCloud work 폴더에 다른
+  세션이 쓴 내용 참고". 경험분류 = iCloud `work-constellation/`(앱 저장소 `~/Documents/app/work-constellation`).
+  그 저장소 `AGENTS.md` 규칙(work.json 직접 수정 시 새 노드만 추가, 문체는 `polish.py` `STYLE`
+  "~했습니다"·문제→판단→조치→결과·"- 사용한 기술")과 서랍·새벽 도서관 항목 형식을 따름.
+  `work.json`에 프로젝트 "텔레그램 주식 정보 요약 봇"(2026.07 – 현재) + 한 일 13개 추가(총 103 → 117 노드,
+  기존 노드 미변경, `ai: ok`·`ai_by: claude`), `polish.write()`로 `업무정리.md`도 다시 씀.
+  한 일: 맥 상시 실행·Actions 배포(하위: git 히스토리 초기화, Documents TCC), 중복·잡담 규칙, 조용한
+  장애 수정, SQLite·catch-up, 정리 개편(하위: 잠자기 누락, Claude·Codex 전환, 🌙 섹션 깨짐), 미러 보안
+  값 가리기, 클라우드 검토, 에이전트 작업 방식. 내용은 git 커밋 94개·이 파일·사용자 iCloud의
+  `텔레그램 주식 요약 설명.txt`에 있는 사실만 사용. 채팅방 ID·토큰 등 보안 값은 넣지 않음.
+  수정 전 백업: 이 세션 scratchpad `work.json.bak`(임시 폴더라 재부팅 시 삭제).
