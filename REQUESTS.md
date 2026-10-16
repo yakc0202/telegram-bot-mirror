@@ -541,3 +541,22 @@
   하나를 폴백으로 두는 방법 제시(실패분만 유료). 사용자 선택 대기.
   알아둘 점: stderr.log에 Gemini 요청 URL이 `key=` 쿼리째 찍혀 Gemini API 키 일부가 평문으로 남음
   (봇 토큰과 같은 문제). 로그 공유 금지, 필요하면 키를 헤더(`x-goog-api-key`)로 옮기는 수정 가능.
+
+### 2026-10-16 로그에 봇 토큰·Gemini 키가 평문으로 남는 문제 제거
+- 상태: 완료 (2026-10-16 배포 e6f8798, 기존 로그 정리 완료)
+- 처리: "로그에 평문으로 남는 문제부터 제거".
+  원인: Gemini 요청이 키를 URL 쿼리(`?key=`)로 보내 429/503 예외 메시지에 키가 찍히고, Bot API 주소
+  (`/bot<토큰>/...`)가 urllib3 재시도 경고·requests 예외에 그대로 찍힘. root 핸들러로 가는 로그는
+  로그 채널(LOG_CHAT_INFO/WARNING)로도 전송되므로 채널에도 남았을 수 있음.
+  수정(`main.py`): Gemini 키를 `x-goog-api-key` 헤더로 이동. `redact_secrets`·`_RedactSecretsFilter`를
+  모든 root 핸들러(콘솔·로그 채널)에 달아 출력 직전에 가림 — 환경변수 이름에 TOKEN/API_KEY/HASH/SECRET이
+  든 값(8자 이상, 쉼표 목록 포함), `bot<숫자>:<토큰>`, `?key=`·`token=` 쿼리, `AIza…`, `sk-…` 모양. 예외
+  추적(exc_text)도 가림.
+  검증: urllib3 경고·`?key=` 메시지·예외 추적에 실제 토큰·키를 넣어 출력 → 노출 0, 헤더 방식 Gemini
+  호출 정상 응답.
+  남은 일: 배포 후 기존 `~/Documents/logs/telegram-bot/{stdout,stderr}.log`의 토큰·키를 같은 규칙으로
+  제자리 치환(파일을 새로 만들지 않고 덮어씀 — launchd가 같은 파일에 계속 기록하도록).
+  배포 후: 11:59 재시작 확인. 기존 `stderr.log`(74.5MB)에서 토큰·키 20,962곳을 같은 규칙으로 제자리 치환
+  (inode 유지, 그 사이 붙은 줄도 같이 처리) → 남은 0, 이후 기록 정상. `stdout.log`는 비어 있었음.
+  사용자 할 일(선택): 로그 채널에 이미 전송된 토큰 포함 메시지는 직접 삭제. 확실히 하려면 봇 토큰
+  (BotFather `/revoke`)과 Gemini 키 재발급.

@@ -268,6 +268,52 @@ if LOG_BOT_TOKEN and LOG_CHAT_WARNING:
     _handler_warning.setLevel(logging.WARNING)  # WARNING 이상만
     logging.getLogger().addHandler(_handler_warning)
 
+# ── 로그에서 비밀값 가리기 ──
+# Bot API 주소에는 봇 토큰이 들어가서(urllib3 재시도 경고·requests 예외 메시지 등) 그대로 찍히면
+# 로그 파일과 로그 채널에 토큰이 남음. 모든 핸들러에 필터를 달아 출력 직전에 가림(다른 라이브러리
+# 로그도 root 핸들러를 거치므로 함께 가려짐).
+_SECRET_ENV_NAME_RE = re.compile(r"(TOKEN|API_KEY|HASH|SECRET)")
+_SECRET_VALUES = sorted({
+    v.strip() for name, raw in os.environ.items() if _SECRET_ENV_NAME_RE.search(name)
+    for v in raw.split(",") if len(v.strip()) >= 8
+}, key=len, reverse=True)
+_SECRET_PATTERNS = [
+    (re.compile(r"bot\d{6,}:[A-Za-z0-9_-]{30,}"), "bot<TOKEN>"),
+    (re.compile(r"([?&](?:key|api_key|token)=)[^&\s'\"]+"), r"\1<SECRET>"),
+    (re.compile(r"AIza[0-9A-Za-z_-]{30,}"), "<GEMINI_KEY>"),
+    (re.compile(r"sk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}"), "<API_KEY>"),
+]
+
+
+def redact_secrets(text: str) -> str:
+    for value in _SECRET_VALUES:
+        if value in text:
+            text = text.replace(value, "<SECRET>")
+    for pattern, repl in _SECRET_PATTERNS:
+        text = pattern.sub(repl, text)
+    return text
+
+
+class _RedactSecretsFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+            redacted = redact_secrets(message)
+            if redacted != message:
+                record.msg, record.args = redacted, None
+            if record.exc_info and not record.exc_text:
+                record.exc_text = logging.Formatter().formatException(record.exc_info)
+            if record.exc_text:
+                record.exc_text = redact_secrets(record.exc_text)
+        except Exception:
+            pass
+        return True
+
+
+_redact_filter = _RedactSecretsFilter()
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_redact_filter)
+
 # 잡담/주식과 무관한 메시지를 걸러낼지 여부 (기본 켜짐)
 CHITCHAT_FILTER_ENABLED = os.environ.get("CHITCHAT_FILTER_ENABLED", "true").strip().lower() in ("1", "true", "yes")
 
@@ -1229,7 +1275,7 @@ def _call_gemini(prompt: str, max_tokens: int) -> str:
             _mark_gemini_key_used(key)
             resp = requests.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
-                params={"key": key},
+                headers={"x-goog-api-key": key},  # URL 쿼리에 넣으면 오류·재시도 로그에 키가 남음
                 json={
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {"maxOutputTokens": max_tokens},
@@ -1272,7 +1318,7 @@ def _call_gemini(prompt: str, max_tokens: int) -> str:
             _mark_gemini_key_used(soonest_key)
             resp = requests.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
-                params={"key": soonest_key},
+                headers={"x-goog-api-key": soonest_key},  # URL 쿼리에 넣으면 오류·재시도 로그에 키가 남음
                 json={
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {"maxOutputTokens": max_tokens},

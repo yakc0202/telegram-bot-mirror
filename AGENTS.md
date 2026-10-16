@@ -172,7 +172,8 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
   `GEMINI_PER_KEY_RPM`, `GEMINI_MAX_COOLDOWN_WAIT`, `LLM_MAX_CALLS_PER_WINDOW`,
   `DAILY_DIGEST_HOUR`(18), `NIGHT_DIGEST_END_HOUR`(8), `DB_PATH`, `SESSION_PATH`,
   `DIGEST_SENT_STATE_PATH`.
-- `stderr.log`에는 봇 토큰이 평문으로 찍힐 수 있다. 로그를 공유하거나 옮기지 않는다.
+- 로그 출력은 모든 root 핸들러에 단 `_RedactSecretsFilter`가 토큰·키를 가린다. 새 핸들러를 추가하면 이 필터도 단다.
+- API 키는 URL 쿼리가 아니라 헤더로 보낸다(Gemini는 `x-goog-api-key`).
 
 ### 작업 방식
 
