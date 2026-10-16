@@ -520,3 +520,16 @@
   `~/.local/state/telegram-bot/digests/YYYYMMDD_HHMM_{raw,final}.txt`에 보관(`_archive_digest`, 최근 60회차,
   `DIGEST_ARCHIVE_DIR`로 변경 가능, 운영 폴더·~/Documents 밖).
   검증: 같은 입력으로 다시 생성 → '~습니다/입니다' 23문장·'~다' 0, 💡 3/3, 미확인 언급 1회.
+
+### 2026-10-16 Gemini를 무료 NVIDIA LLM(build.nvidia.com NIM API)으로 교체 가능한지 검토
+- 상태: 완료 (검토만, 교체 안 함 — 추천하지 않음)
+- 처리: "nvidia llm이 무료라고 들었는데 Gemini를 이걸로 교체할 수 있을지 확인".
+  기술적으로는 가능: OpenAI 호환 엔드포인트(`https://integrate.api.nvidia.com/v1`)라 `_call_openai`의
+  고정 URL을 환경변수로 바꾸는 작은 수정이면 붙일 수 있음.
+  추천하지 않는 이유: (1) 무료 키는 API Trial 약관상 개발·테스트·평가용이고, 실제 사용자에게 서비스하는
+  운영 사용은 NVIDIA AI Enterprise 라이선스 필요 — 지인 채널로 매일 보내는 이 봇은 운영 사용에 가까움.
+  (2) 한도: 키당 약 40 RPM(모델별 상이, 비공개) 하나뿐. 로그상 분당 LLM 관련 줄이 최대 35(10/15 21:31),
+  20 이상인 분이 4일간 19번이고, 잡담 필터 호출은 로그에 안 남아 실제 호출은 더 많음 → 몰릴 때 넘칠 수 있음.
+  지금 Gemini는 키 19개 × 분당 12. (3) 비용 이점 없음: Gemini도 무료 한도 안에서 0원.
+  참고: 사진 판정(`classify_image_is_stock_related`)은 Gemini가 아니라 Anthropic 키가 있을 때만 동작.
+  자료: NVIDIA NIM 무료 한도·약관 정리 글(decodethefuture.org, yangmao.ai, NVIDIA 개발자 포럼 검색 결과).
