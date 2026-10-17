@@ -545,3 +545,31 @@
   (inode 유지, 그 사이 붙은 줄도 같이 처리) → 남은 0, 이후 기록 정상. `stdout.log`는 비어 있었음.
   사용자 할 일(선택): 로그 채널에 이미 전송된 토큰 포함 메시지는 직접 삭제. 확실히 하려면 봇 토큰
   (BotFather `/revoke`)과 Gemini 키 재발급.
+
+### 2026-10-16 NVIDIA(build.nvidia.com)를 Gemini 실패 시 폴백으로만 추가
+- 상태: 진행중 (코드 준비 완료, 사용자 NVIDIA 키 발급 대기 → 모델 선정·시험 → 배포)
+- 처리: "nvidia만 추가하기" — 결제 Gemini 키 대신 NVIDIA 무료 키 폴백을 선택(약관상 개발·테스트용이라는
+  점은 앞 항목에서 안내함).
+  `main.py`: provider `nvidia` 추가(`_call_nvidia`, OpenAI 호환 `/chat/completions`, Bearer 헤더). 환경변수
+  `NVIDIA_API_KEY`, `NVIDIA_MODEL`(필수), `NVIDIA_BASE_URL`(기본 `https://integrate.api.nvidia.com/v1`),
+  `NVIDIA_RPM`(기본 35 — 무료 약 40 RPM보다 낮게, 넘으면 기다리지 않고 바로 실패). 추론형 모델의
+  `<think>` 블록 제거. 로그 가림·`mirror-push.sh` 검사에 `nvapi-` 키 모양 추가.
+  연결 방법: `.env`에 `LLM_FALLBACK_PROVIDERS=nvidia` → Gemini가 실패할 때만 NVIDIA 호출.
+  사용자 할 일: build.nvidia.com 로그인 → API 키 발급(`nvapi-…`) → `~/.config/telegram-bot/.env`에
+  `NVIDIA_API_KEY=` 한 줄 추가.
+  추가 질문 "추천하는 모델은?" → 공개 모델 목록(`/v1/models`, 키 없이 조회, 81개)에서 후보 선정.
+  기준: 중복 확인·잡담 필터는 `max_tokens` 5~10으로 한 단어만 받으므로 생각 과정을 먼저 쓰는 추론형
+  모델은 부적합, 한국어 요약 품질, 속도. 추천 1순위 `google/gemma-4-31b-it`(비추론·Gemini와 같은 계열),
+  2순위 `deepseek-ai/deepseek-v4.1-flash`, 3순위 `z-ai/glm-5.3-flash`. 제외: 추론형(nemotron-*-reasoning,
+  kimi-k2.6), 오래된 소형(llama2, mistral-7b 등). 키 발급 후 실제 메시지로 세 후보를 시험해 확정 예정.
+
+### 2026-10-17 요약과 전망을 한 번의 LLM 호출로 합치기
+- 상태: 보류 (현황 설명, 사용자 선택 대기)
+- 처리: "요약→전망을 두 번 호출해서 낭비니까 한 번에 처리하고 싶음".
+  진단: 요약과 전망(💡)은 이미 `summarize_message` 한 번의 호출로 두 줄을 받아 나눠 씀(별도 호출 없음).
+  메시지당 실제 LLM 호출: 잡담 판단(`classify_is_stock_related`) + 중복 확인(애매할 때) + 요약.
+  잡담 판단은 키워드 규칙(`looks_stock_related_heuristic`)이 먼저 처리해 LLM까지 가는 건 전송된 메시지의
+  약 14%(10/12~16 DB 586건 중 81건), 중복 기록은 35건 중 19건. 로그상 하루 전송 977~1,179건,
+  중복 확인 LLM 판단 950~1,492회로 중복 확인이 가장 큰 비중.
+  선택지: (A) 잡담 판단을 요약 호출에 합치기 — 하루 약 100~150회 절약, 대신 잡담도 중복 확인을 먼저 거치고
+  특수 형식 요약(브리핑류)에는 판단을 생략. (B) 그대로 두기.
