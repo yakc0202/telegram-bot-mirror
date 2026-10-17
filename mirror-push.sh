@@ -66,6 +66,7 @@ generic = [
     r'\b[0-9]{8,10}:[A-Za-z0-9_-]{35}\b',   # 텔레그램 봇 토큰
     r'\bAIza[0-9A-Za-z_-]{35}\b',           # Google(Gemini) API 키
     r'\bsk-(ant-|proj-)?[A-Za-z0-9_-]{20,}', # Anthropic/OpenAI 키
+    r'\bnvapi-[A-Za-z0-9_-]{20,}',          # NVIDIA 키
     r'\b[0-9a-f]{32}\b',                    # 텔레그램 API hash 모양
     r'\+82[0-9 -]{8,}',                     # 전화번호
     r'-100[0-9]{9,}',                       # 채널·그룹 ID
