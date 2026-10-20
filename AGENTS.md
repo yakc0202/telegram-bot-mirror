@@ -79,6 +79,8 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
   (`_looks_like_calendar_number`)은 제외. 키워드 점수 < `MIN_KW_SCORE_FOR_NUMBER_BOOST`(0.15)면
   숫자 기여 무시.
 - 반복 보일러플레이트(증권사 앱 안내, 세션 시점 단어 등)는 `STOPWORDS`에 추가한다.
+- 중복 확인은 요약·잡담 판단 호출에 합치지 않는다(새 정보를 중복으로 오판함, 근거
+  `docs/테스트/중복확인-합치기-C4-테스트.md`).
 - 정형 표·반복 데이터는 구분 키를 추출해 다르면 제외: `extract_bond_table_type()`(국채 만기),
   `extract_export_data_product()`(수출 품목).
 - LLM 프롬프트 원칙: 핵심 주체가 다르면 DIFFERENT(최우선). 우연히 같은 작은 정수는 근거가

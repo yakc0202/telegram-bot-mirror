@@ -28,6 +28,7 @@ src, mirror, env_file = map(Path, sys.argv[1:])
 EXCLUDE = {
     'SYNC.md',                            # 지금 상태 요약(운영 맥락)
     'docs/테스트/메시지-요약-테스트.md',  # 감시 채널 원문·채널 이름이 들어 있음
+    'docs/테스트/중복확인-합치기-C4-테스트.md',  # 감시 채널 원문이 들어 있음
 }
 # 경로를 바꿔 내보내는 파일: 미러에서 워크플로가 실행되지 않게 참고용으로만 둔다
 RENAME = {'.github/workflows/deploy.yml': 'docs/deploy.yml.reference'}
