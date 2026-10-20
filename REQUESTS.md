@@ -722,3 +722,13 @@
   (새 pid 99191, 13:02:31) → `~/Documents/logs/telegram-bot/` 읽기 정상. 권한 추가만으로는 안 되고 보조 앱 재시작이 필요했음.
   막혀 있던 동안 봇은 정상: 11~13시 로그 줄 45·31·17(점심 시간대라 적음), 미디어 전송 실패 1건은 재전송 큐로 13:02 성공.
 
+### 2026-10-20 A 배포 (잡담 판단을 요약 호출에 합치기 + 요약 말투 규칙 + NVIDIA provider 코드)
+- 상태: 진행 중 (배포 후 확인)
+- 처리: "배포해". `main.py`: `STOCK_CATEGORY_CRITERIA`, `summarize_message(text, with_category)`, `uses_general_summary`,
+  `remove_new_entry`, `process_event`의 판단 미루기, 요약 지시 "'~습니다/~입니다' 체" 한 줄, NVIDIA provider(`_call_nvidia`,
+  설정 없으면 미사용), 로그 가림 패턴 `nvapi-`, 되돌리기 스위치 `MERGED_LLM_CHECKS`(기본 true, `.env`에 false면 잡담 판단을
+  예전처럼 따로 먼저 호출). 배포 전 확인: py_compile, 실제 메시지 4건(정보 2 → STOCK·습니다체, "주택 시장도 추락중입니다" →
+  OPINION, "앗 쏘리 잘못 올렸네요" → CHITCHAT), 잡담 등록 되돌리기(버퍼·DB 1→0).
+  알아둘 점: 잡담은 이제 중복 확인 뒤에 판정됨 — 같은 잡담이 다시 오면 "💬 잡담" 대신 "🔁 동일내용", 잡담 판정이 그 메시지의
+  중복 확인 시간만큼 늦어짐. 전용 요약(브리핑류)·짧은 캡션·HTML은 예전처럼 잡담 판단을 먼저 따로 호출.
+

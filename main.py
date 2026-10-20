@@ -282,6 +282,7 @@ _SECRET_PATTERNS = [
     (re.compile(r"([?&](?:key|api_key|token)=)[^&\s'\"]+"), r"\1<SECRET>"),
     (re.compile(r"AIza[0-9A-Za-z_-]{30,}"), "<GEMINI_KEY>"),
     (re.compile(r"sk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}"), "<API_KEY>"),
+    (re.compile(r"nvapi-[A-Za-z0-9_-]{20,}"), "<NVIDIA_KEY>"),
 ]
 
 
@@ -316,6 +317,8 @@ for _handler in logging.getLogger().handlers:
 
 # 잡담/주식과 무관한 메시지를 걸러낼지 여부 (기본 켜짐)
 CHITCHAT_FILTER_ENABLED = os.environ.get("CHITCHAT_FILTER_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+# 일반 요약을 타는 메시지는 잡담 판단을 요약 호출에 합침(false면 예전처럼 잡담 판단을 따로 먼저 호출)
+MERGED_LLM_CHECKS = os.environ.get("MERGED_LLM_CHECKS", "true").strip().lower() in ("1", "true", "yes")
 
 # ── LLM 제공자 선택 (anthropic / openai / gemini) ──
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "anthropic").strip().lower()
@@ -328,6 +331,13 @@ OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash")
+
+# NVIDIA build.nvidia.com(NIM, OpenAI 호환) — Gemini가 실패할 때만 쓰는 폴백용
+# (LLM_FALLBACK_PROVIDERS=nvidia). 무료 키는 분당 약 40회라 NVIDIA_RPM으로 직접 제한함.
+NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY")
+NVIDIA_MODEL = os.environ.get("NVIDIA_MODEL", "")
+NVIDIA_BASE_URL = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
+NVIDIA_RPM = int(os.environ.get("NVIDIA_RPM", 35))
 
 # 여러 개의 Gemini API 키를 콤마로 등록하면, 요청마다 순서를 돌려가며 사용하고
 # 특정 키가 실패(rate limit 등)하면 같은 호출 안에서 자동으로 다음 키를 시도함.
@@ -581,6 +591,22 @@ def update_entry_summary_link(hash_key: str, summary_link: str, summary_text: st
             if summary_text:
                 entry["summary_text"] = summary_text
             save_entry_to_db(entry)
+            return
+
+
+def remove_new_entry(text: str):
+    """is_duplicate()가 새 정보로 등록한 항목을 되돌림 — 요약 단계에서 잡담으로 판정된 메시지가
+    이후 중복 비교 후보나 일간 정리 입력으로 남지 않게 함."""
+    global recent_buffer
+    for i in range(len(recent_buffer) - 1, -1, -1):
+        entry = recent_buffer[i]
+        if entry["text"] == text:
+            del recent_buffer[i]
+            if not any(e["hash"] == entry["hash"] for e in recent_buffer):
+                seen_hashes.discard(entry["hash"])
+            db = get_db()
+            db.execute("DELETE FROM messages WHERE hash = ? AND time = ?", (entry["hash"], entry["time"].isoformat()))
+            db.commit()
             return
 
 
@@ -986,6 +1012,61 @@ def classify_image_is_stock_related(image_bytes: bytes, media_type: str = "image
         return None
 
 
+STOCK_CATEGORY_CRITERIA = (
+    "아래 텔레그램 메시지가 'STOCK'(주식/투자 관련 정보), 'CHITCHAT'(주식과 무관한 잡담), "
+    "'OPINION'(실행 가능한 정보는 없지만 시장/정책 등에 대한 개인의 분석적 의견이나 소신 "
+    "발언) 중 어디에 해당하는지 판단해줘.\n"
+    "종목, 매매 방향, 가격/차트, 시황 뿐 아니라 금리, 관세, 전쟁, 정상회담, 선거처럼 "
+    "주가나 시장에 영향을 줄 수 있는 정치/거시경제 뉴스도 STOCK으로 간주해줘.\n"
+    "인사말, 감사 인사, 채널 홍보, 순수 잡담, 농담처럼 시장과 무관한 대화는 CHITCHAT이야.\n"
+    "중요: 시장 관련 단어(베어마켓, 급등, 폭락 등)를 언급하더라도, 그 자체로 새로운 정보나 "
+    "분석을 전달하지 않고 다른 메시지에 대한 짧은 반응/감상/맞장구만 담은 경우도 CHITCHAT으로 "
+    "판단해. 예: '대놓고 베어마켓이라고 쓰는구나', 'ㄹㅇㅋㅋ 이러다 진짜 되겠는데' 같은 문장은 "
+    "그 자체로 독립적인 정보가 없으므로 CHITCHAT이야.\n"
+    "또한, 특정 종목명·가격·방향성 등 구체적이고 실행 가능한 정보 없이 "
+    "'오를 건 오르고 내릴 건 내린다', '요즘 장이 왜 이러냐' 처럼 막연한 시장 한탄/감상만 "
+    "담은 문장도 CHITCHAT으로 판단해.\n"
+    "또한 중요: 실제 데이터나 근거 없이, 누군가 미리 정보를 알고 움직이는 것 같다는 식의 "
+    "막연한 추측·의심·농담 섞인 코멘트도 CHITCHAT이야. 예: '내일 CPI 잘 나오는 거 미리 확인하고 "
+    "칼춤 추는 중일지....'는 CPI라는 단어가 있지만 실제 CPI 전망치나 데이터는 전혀 없고, "
+    "'누가 선행매매 하는 거 아니냐'는 슬랭 섞인 농담 섞인 추측일 뿐이므로 CHITCHAT이야. 이런 "
+    "문장을 근거로 '투자자들이 CPI가 예상치보다 낮게 나올 가능성을 선반영해 매수/매도 대응 "
+    "중이다'처럼 실제로 언급되지 않은 구체적 내용을 지어내면 안 돼.\n"
+    "또한 중요: 내일/오늘 있을 행사·토론회·발표 등을 짧게 알리면서 'ㅋㅋㅋ' 같은 웃음/냉소 "
+    "반응이 붙어 있으면, 정식 보도가 아니라 그 자체가 비웃음/냉소적 반응이므로 CHITCHAT이야. "
+    "예: '내일 초과이윤 재분배 토론회 개최됩니다. ㅋㅋㅋㅋ'는 실제 사건을 언급하지만 웃음 "
+    "반응이 붙어있어 냉소적 코멘트일 뿐이므로 CHITCHAT이야.\n"
+    "또한 중요: 여러 회사/종목명이 나열되고 '실적 발표' 같은 단어가 반복되더라도, 형식이 "
+    "'9가지 조건이 전부 맞아야 한다'는 식의 과장된 밈/유머 시나리오이거나 비속어(예: '아가리 "
+    "싸물기', '징징대는')가 섞여 있으면 진지한 분석이 아니라 밈/유머이므로 CHITCHAT이야.\n"
+    "또한 중요: '시장', '손실', '반대매매', '투자' 같은 단어가 여러 번 나오고 길게 쓰여 있어도, "
+    "종목명·가격·매매 방향·구체적 분석 같은 실행 가능한 정보가 전혀 없이 운영자의 개인적인 "
+    "소회, 다른 채널 운영자/구독자들에 대한 응원·위로, 힘든 시장 상황에 대한 감정적 반응만 "
+    "담겨 있다면 CHITCHAT이야. 길이가 길고 진지한 어조라고 해서 정보성 글이 되는 건 아니야.\n"
+    "또한 중요: 실행 가능한 정보(종목/가격/매매방향)는 없지만, 시장 구조나 정책·정부 발언 등이 "
+    "시장에 미치는 영향에 대해 나름의 논리를 갖추고 분석적으로 서술한 개인 의견/소신 발언이면 "
+    "OPINION이야. 예: '한국 메모리 비중이 커지면서 정부 인사 발언이 블룸버그를 통해 재귀적으로 "
+    "시장에 영향을 주는 것 같다'처럼 자기 나름의 분석 논리를 전개하는 글은 OPINION이야. "
+    "짧은 문장이라도, 경제 이론이나 개념을 빌려와 현재 상황을 평가하는 개인적 코멘트도 OPINION "
+    "이야. 예: '개인적으로 이번 장은 맨큐의 경제학원론 같은데서 정부실패의 대표적인 케이스로 "
+    "다뤄도 된다고 생각함'은 구체적 종목/가격 정보가 전혀 없지만, 경제학 개념(정부실패)을 빌려 "
+    "정책 상황을 평가하는 개인 의견이므로 OPINION이야 (STOCK으로 오인해서 요약하면 안 됨).\n"
+    "단순 반응/한탄(위 CHITCHAT 규칙들)과 달리, 논리적 근거를 갖춘 주장이면 OPINION으로 구분해.\n"
+    "또한 중요: '매수', '매도', '가격' 같은 단어가 있어도, 당근마켓/중고나라 등 중고물품 거래나 "
+    "개인적인 일상 대화 맥락이면 CHITCHAT이야. 예: '노트북 매수 문의가 오네요, 20만원에 팔고 "
+    "올게요'는 '매수'라는 단어가 있지만 실제로는 중고 노트북 판매 잡담이므로 CHITCHAT이야. "
+    "단어만 보지 말고 실제로 주식/투자를 이야기하는 맥락인지 확인해.\n"
+    "또한 중요: 특정 회사/기업을 주체로 한 뉴스 기사라면, 사회공헌(CSR)·인사이동·조직개편·수상 "
+    "소식처럼 시장에 직접적인 영향이 없는 내용이라도 STOCK으로 간주해. 예: '한국자금중개, "
+    "경희궁 환경정화 봉사'처럼 특정 상장/비상장 기업이 주어인 뉴스는 시황과 무관해도 STOCK이야. "
+    "다만 이건 정식 언론사가 그 기업의 경영활동을 보도하는 '기업을 주체로 한 뉴스 기사'일 때만 "
+    "해당해. 개인 잡담/인사말/채널 홍보/중고거래 뿐 아니라, 개인 블로그의 취미·상품 후기· "
+    "장난감/캐릭터 리뷰 등도 여전히 CHITCHAT이야 — 그 안에 마트/기업 이름이나 '매출', '순위' "
+    "같은 단어가 우연히 섞여 있어도(예: 장난감 인기순위 표에 '롯데마트 매출' 같은 문구가 "
+    "곁들여진 경우), 글의 주제 자체가 기업 경영이 아니라 개인 취미/제품 리뷰라면 CHITCHAT이야.\n"
+)
+
+
 def classify_is_stock_related(text: str, urls: set) -> str:
     """'STOCK', 'CHITCHAT', 'OPINION' 중 하나를 반환.
     OPINION은 실행 가능한 정보는 없지만 시장/정책 등에 대한 개인의 분석적 의견/소신 발언인 경우
@@ -996,57 +1077,7 @@ def classify_is_stock_related(text: str, urls: set) -> str:
     if heuristic is False:
         return "CHITCHAT"
     prompt = (
-        "아래 텔레그램 메시지가 'STOCK'(주식/투자 관련 정보), 'CHITCHAT'(주식과 무관한 잡담), "
-        "'OPINION'(실행 가능한 정보는 없지만 시장/정책 등에 대한 개인의 분석적 의견이나 소신 "
-        "발언) 중 어디에 해당하는지 판단해줘.\n"
-        "종목, 매매 방향, 가격/차트, 시황 뿐 아니라 금리, 관세, 전쟁, 정상회담, 선거처럼 "
-        "주가나 시장에 영향을 줄 수 있는 정치/거시경제 뉴스도 STOCK으로 간주해줘.\n"
-        "인사말, 감사 인사, 채널 홍보, 순수 잡담, 농담처럼 시장과 무관한 대화는 CHITCHAT이야.\n"
-        "중요: 시장 관련 단어(베어마켓, 급등, 폭락 등)를 언급하더라도, 그 자체로 새로운 정보나 "
-        "분석을 전달하지 않고 다른 메시지에 대한 짧은 반응/감상/맞장구만 담은 경우도 CHITCHAT으로 "
-        "판단해. 예: '대놓고 베어마켓이라고 쓰는구나', 'ㄹㅇㅋㅋ 이러다 진짜 되겠는데' 같은 문장은 "
-        "그 자체로 독립적인 정보가 없으므로 CHITCHAT이야.\n"
-        "또한, 특정 종목명·가격·방향성 등 구체적이고 실행 가능한 정보 없이 "
-        "'오를 건 오르고 내릴 건 내린다', '요즘 장이 왜 이러냐' 처럼 막연한 시장 한탄/감상만 "
-        "담은 문장도 CHITCHAT으로 판단해.\n"
-        "또한 중요: 실제 데이터나 근거 없이, 누군가 미리 정보를 알고 움직이는 것 같다는 식의 "
-        "막연한 추측·의심·농담 섞인 코멘트도 CHITCHAT이야. 예: '내일 CPI 잘 나오는 거 미리 확인하고 "
-        "칼춤 추는 중일지....'는 CPI라는 단어가 있지만 실제 CPI 전망치나 데이터는 전혀 없고, "
-        "'누가 선행매매 하는 거 아니냐'는 슬랭 섞인 농담 섞인 추측일 뿐이므로 CHITCHAT이야. 이런 "
-        "문장을 근거로 '투자자들이 CPI가 예상치보다 낮게 나올 가능성을 선반영해 매수/매도 대응 "
-        "중이다'처럼 실제로 언급되지 않은 구체적 내용을 지어내면 안 돼.\n"
-        "또한 중요: 내일/오늘 있을 행사·토론회·발표 등을 짧게 알리면서 'ㅋㅋㅋ' 같은 웃음/냉소 "
-        "반응이 붙어 있으면, 정식 보도가 아니라 그 자체가 비웃음/냉소적 반응이므로 CHITCHAT이야. "
-        "예: '내일 초과이윤 재분배 토론회 개최됩니다. ㅋㅋㅋㅋ'는 실제 사건을 언급하지만 웃음 "
-        "반응이 붙어있어 냉소적 코멘트일 뿐이므로 CHITCHAT이야.\n"
-        "또한 중요: 여러 회사/종목명이 나열되고 '실적 발표' 같은 단어가 반복되더라도, 형식이 "
-        "'9가지 조건이 전부 맞아야 한다'는 식의 과장된 밈/유머 시나리오이거나 비속어(예: '아가리 "
-        "싸물기', '징징대는')가 섞여 있으면 진지한 분석이 아니라 밈/유머이므로 CHITCHAT이야.\n"
-        "또한 중요: '시장', '손실', '반대매매', '투자' 같은 단어가 여러 번 나오고 길게 쓰여 있어도, "
-        "종목명·가격·매매 방향·구체적 분석 같은 실행 가능한 정보가 전혀 없이 운영자의 개인적인 "
-        "소회, 다른 채널 운영자/구독자들에 대한 응원·위로, 힘든 시장 상황에 대한 감정적 반응만 "
-        "담겨 있다면 CHITCHAT이야. 길이가 길고 진지한 어조라고 해서 정보성 글이 되는 건 아니야.\n"
-        "또한 중요: 실행 가능한 정보(종목/가격/매매방향)는 없지만, 시장 구조나 정책·정부 발언 등이 "
-        "시장에 미치는 영향에 대해 나름의 논리를 갖추고 분석적으로 서술한 개인 의견/소신 발언이면 "
-        "OPINION이야. 예: '한국 메모리 비중이 커지면서 정부 인사 발언이 블룸버그를 통해 재귀적으로 "
-        "시장에 영향을 주는 것 같다'처럼 자기 나름의 분석 논리를 전개하는 글은 OPINION이야. "
-        "짧은 문장이라도, 경제 이론이나 개념을 빌려와 현재 상황을 평가하는 개인적 코멘트도 OPINION "
-        "이야. 예: '개인적으로 이번 장은 맨큐의 경제학원론 같은데서 정부실패의 대표적인 케이스로 "
-        "다뤄도 된다고 생각함'은 구체적 종목/가격 정보가 전혀 없지만, 경제학 개념(정부실패)을 빌려 "
-        "정책 상황을 평가하는 개인 의견이므로 OPINION이야 (STOCK으로 오인해서 요약하면 안 됨).\n"
-        "단순 반응/한탄(위 CHITCHAT 규칙들)과 달리, 논리적 근거를 갖춘 주장이면 OPINION으로 구분해.\n"
-        "또한 중요: '매수', '매도', '가격' 같은 단어가 있어도, 당근마켓/중고나라 등 중고물품 거래나 "
-        "개인적인 일상 대화 맥락이면 CHITCHAT이야. 예: '노트북 매수 문의가 오네요, 20만원에 팔고 "
-        "올게요'는 '매수'라는 단어가 있지만 실제로는 중고 노트북 판매 잡담이므로 CHITCHAT이야. "
-        "단어만 보지 말고 실제로 주식/투자를 이야기하는 맥락인지 확인해.\n"
-        "또한 중요: 특정 회사/기업을 주체로 한 뉴스 기사라면, 사회공헌(CSR)·인사이동·조직개편·수상 "
-        "소식처럼 시장에 직접적인 영향이 없는 내용이라도 STOCK으로 간주해. 예: '한국자금중개, "
-        "경희궁 환경정화 봉사'처럼 특정 상장/비상장 기업이 주어인 뉴스는 시황과 무관해도 STOCK이야. "
-        "다만 이건 정식 언론사가 그 기업의 경영활동을 보도하는 '기업을 주체로 한 뉴스 기사'일 때만 "
-        "해당해. 개인 잡담/인사말/채널 홍보/중고거래 뿐 아니라, 개인 블로그의 취미·상품 후기· "
-        "장난감/캐릭터 리뷰 등도 여전히 CHITCHAT이야 — 그 안에 마트/기업 이름이나 '매출', '순위' "
-        "같은 단어가 우연히 섞여 있어도(예: 장난감 인기순위 표에 '롯데마트 매출' 같은 문구가 "
-        "곁들여진 경우), 글의 주제 자체가 기업 경영이 아니라 개인 취미/제품 리뷰라면 CHITCHAT이야.\n"
+        STOCK_CATEGORY_CRITERIA +
         "답은 반드시 STOCK, CHITCHAT, OPINION 중 하나만 답해.\n\n"
         f"[메시지]\n{text}"
     )
@@ -1207,6 +1238,39 @@ def _call_openai(prompt: str, max_tokens: int) -> str:
     return resp.json()["choices"][0]["message"]["content"].strip()
 
 
+_nvidia_call_times: list = []
+
+
+def _call_nvidia(prompt: str, max_tokens: int) -> str:
+    now = time.monotonic()
+    _nvidia_call_times[:] = [t for t in _nvidia_call_times if now - t < 60]
+    if len(_nvidia_call_times) >= NVIDIA_RPM:
+        # 처리 잠금을 쥔 채 기다리지 않도록 바로 실패 처리
+        raise RuntimeError(f"NVIDIA 분당 한도({NVIDIA_RPM}) 도달")
+    if not NVIDIA_MODEL:
+        raise RuntimeError("NVIDIA_MODEL 없음")
+    _throttle_llm_calls()
+    _nvidia_call_times.append(now)
+    resp = requests.post(
+        f"{NVIDIA_BASE_URL}/chat/completions",
+        headers={"Authorization": f"Bearer {NVIDIA_API_KEY}"},
+        json={
+            "model": NVIDIA_MODEL,
+            "max_tokens": max_tokens,
+            "temperature": 0.2,
+            "messages": [{"role": "user", "content": prompt}],
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    content = (resp.json()["choices"][0]["message"].get("content") or "").strip()
+    # 추론형 모델이 <think>…</think>를 앞에 붙이는 경우 제거
+    content = re.sub(r"^<think>.*?</think>\s*", "", content, flags=re.S).strip()
+    if not content:
+        raise RuntimeError("NVIDIA 빈 응답")
+    return content
+
+
 _gemini_key_counter = 0
 
 
@@ -1346,6 +1410,10 @@ def _dispatch_llm_call(provider: str, prompt: str, max_tokens: int) -> str:
         if not OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY 없음")
         return _call_openai(prompt, max_tokens)
+    elif provider == "nvidia":
+        if not NVIDIA_API_KEY:
+            raise RuntimeError("NVIDIA_API_KEY 없음")
+        return _call_nvidia(prompt, max_tokens)
     elif provider == "gemini":
         if not GEMINI_API_KEYS:
             raise RuntimeError("GEMINI_API_KEY(S) 없음")
@@ -1586,10 +1654,21 @@ TRUMP_WORDING_INSTRUCTION = (
 )
 
 
-def summarize_message(text: str) -> Optional[dict]:
+def summarize_message(text: str, with_category: bool = False) -> Optional[dict]:
     """전달할 메시지를 요약 + 인사이트로 나눠서 반환.
-    반환값: {"summary": str, "insight": Optional[str]} 또는 실패 시 None."""
+    반환값: {"summary": str, "insight": Optional[str], "category": str} 또는 실패 시 None.
+    with_category=True면 잡담 판단(STOCK/CHITCHAT/OPINION)도 같은 호출에서 받음 — 키워드 규칙으로
+    판단이 안 된 메시지에 잡담 판단 호출을 따로 하지 않으려는 용도. STOCK이 아니면 summary는 빈 문자열."""
+    category_part = ""
+    if with_category:
+        category_part = (
+            "[0단계: 분류] 먼저 아래 기준으로 메시지를 분류해서 첫 줄에 '분류: STOCK', '분류: CHITCHAT', "
+            "'분류: OPINION' 중 하나를 출력해. CHITCHAT이나 OPINION이면 그 한 줄만 출력하고 끝내. "
+            "STOCK이면 그 다음 줄부터 아래 요약 형식대로 두 줄을 이어서 출력해.\n"
+            + STOCK_CATEGORY_CRITERIA + "\n[요약 형식]\n"
+        )
     prompt = (
+        category_part +
         "아래 텔레그램 메시지를 분석해서, 정확히 아래 형식으로만 출력해 (두 줄):\n"
         "[첫 번째 줄] 핵심 사실 요약 1~2문장. 종목명, 매수/매도 방향, 가격/목표가 등 핵심 정보가 "
         "있다면 반드시 포함. 정치/거시경제 뉴스라면 핵심 사건과 시장(주가, 환율, 금리 등)에 미칠 "
@@ -1601,22 +1680,48 @@ def summarize_message(text: str) -> Optional[dict]:
         "볼 수 없어. 텍스트만으로 어떤 종목/자산인지 알 수 없다면 '특정 종목'처럼 부정확하게 "
         "단정하지 말고, 알 수 있는 정보(가격, 등락률, 방향 등)만 사실대로 서술해.\n"
         "라벨(예: '요약:', '인사이트:')이나 번호, 불릿기호는 절대 붙이지 말고, 문장만 줄바꿈으로 "
-        "구분해서 딱 두 줄만 출력해. 군더더기 표현(이모지, 홍보 문구, 채널 소개 등)은 빼고 정보만 담아줘.\n\n"
+        "구분해서 딱 두 줄만 출력해. 군더더기 표현(이모지, 홍보 문구, 채널 소개 등)은 빼고 정보만 담아줘.\n"
+        "두 줄 모두 문장 끝은 '~습니다/~입니다' 체로 써('~함', '~했다'처럼 끝내지 마).\n\n"
         + TRUMP_WORDING_INSTRUCTION + "\n\n" +
         f"[메시지]\n{text}"
     )
-    result = call_llm(prompt, max_tokens=250)
+    result = call_llm(prompt, max_tokens=280 if with_category else 250)
     if not result:
         return None
 
     lines = [line.strip() for line in result.strip().split("\n")]
     lines = [line for line in lines if line]  # 빈 줄 제거
 
+    category = "STOCK"
+    if with_category and lines:
+        m = re.match(r"^\**\s*분류\s*[:：]\s*\**\s*([A-Za-z]+)", lines[0])
+        if m:
+            lines = lines[1:]
+            word = m.group(1).upper()
+            # 판단이 애매하면 놓치는 것보다 통과시키는 쪽(classify_is_stock_related와 같은 원칙)
+            if word.startswith("CHITCHAT"):
+                category = "CHITCHAT"
+            elif word.startswith("OPINION"):
+                category = "OPINION"
+        if category != "STOCK":
+            return {"summary": "", "insight": None, "category": category}
+
     if not lines:
         return None
     summary = lines[0]
     insight = lines[1] if len(lines) > 1 else None
-    return {"summary": summary, "insight": insight}
+    return {"summary": summary, "insight": insight, "category": category}
+
+
+def uses_general_summary(text: str) -> bool:
+    """process_event에서 전용 요약 함수가 아니라 summarize_message로 요약될 메시지인지
+    (분기 순서와 같게 유지해야 함)."""
+    if len(text.strip()) < 5 or is_market_close_snapshot(text):
+        return False
+    return not (
+        is_regional_briefing(text) or is_political_briefing(text) or is_qna_briefing(text)
+        or is_reddit_analysis(text) or is_market_close_briefing(text) or is_numbered_news_list(text)
+    )
 
 
 def is_regional_briefing(text: str) -> bool:
@@ -3772,20 +3877,31 @@ async def main():
             source_label = "출처"
             source_link = None
 
+        async def send_chitchat_label(category: str):
+            label = "💬 잡담(의견)" if category == "OPINION" else "💬 잡담"
+            log.info(f"주식과 무관한 것으로 판단({category}): {text[:40]!r}")
+            body = label
+            if source_link:
+                body += f"\n🔗 원문 보기: {source_link}"
+            await send_to_summary_chat(body, log_label=text[:40])
+
+        # 키워드 규칙으로 판단이 안 된 메시지 중 일반 요약(summarize_message)을 탈 메시지는 잡담
+        # 판단을 요약 호출에 합쳐서 한 번에 받음(잡담 판단 호출을 따로 하지 않음).
+        category_deferred = False
         if CHITCHAT_FILTER_ENABLED and text.strip() and not is_html_source:
-            try:
-                async with llm_processing_lock:
-                    category = await asyncio.to_thread(classify_is_stock_related, text, extract_urls(text))
-            except Exception as e:
-                log.error(f"잡담 판단 중 오류, 안전하게 통과시킴: {e}")
+            heuristic = looks_stock_related_heuristic(text, extract_urls(text))
+            if heuristic is None and MERGED_LLM_CHECKS and SUMMARIZE_ENABLED and uses_general_summary(text):
+                category_deferred = True
                 category = "STOCK"
+            else:
+                try:
+                    async with llm_processing_lock:
+                        category = await asyncio.to_thread(classify_is_stock_related, text, extract_urls(text))
+                except Exception as e:
+                    log.error(f"잡담 판단 중 오류, 안전하게 통과시킴: {e}")
+                    category = "STOCK"
             if category != "STOCK":
-                label = "💬 잡담(의견)" if category == "OPINION" else "💬 잡담"
-                log.info(f"주식과 무관한 것으로 판단({category}): {text[:40]!r}")
-                body = label
-                if source_link:
-                    body += f"\n🔗 원문 보기: {source_link}"
-                await send_to_summary_chat(body, log_label=text[:40])
+                await send_chitchat_label(category)
                 return
 
         matched = None
@@ -3822,6 +3938,7 @@ async def main():
             return
 
         notify_text = None
+        deferred_category = "STOCK"
         meaningful_caption = len(text.strip()) >= 5  # 너무 짧은 캡션은 LLM한테 보내봐야 의미 없음
         if meaningful_caption and is_market_close_snapshot(text):
             # 지수/자산 가격만 나열하는 스냅샷은 이미 숫자 데이터라 요약할 게 없고, 오히려
@@ -3844,11 +3961,17 @@ async def main():
                 elif is_numbered_news_list(text):
                     notify_text = await asyncio.to_thread(summarize_numbered_news_list, text)
                 else:
-                    result = await asyncio.to_thread(summarize_message, text)
-                    if result:
+                    result = await asyncio.to_thread(summarize_message, text, category_deferred)
+                    if result and result.get("category", "STOCK") != "STOCK":
+                        deferred_category = result["category"]
+                        await asyncio.to_thread(remove_new_entry, text)
+                    elif result:
                         notify_text = result["summary"]
                         if result.get("insight"):
                             notify_text += f"\n\n💡 {result['insight']}"
+            if deferred_category != "STOCK":
+                await send_chitchat_label(deferred_category)
+                return
             if not notify_text:
                 # 요약 생성이 실패해도(API 오류 등) 메시지가 통째로 드롭되지 않도록 미리보기로 폴백
                 log.warning("요약 생성 실패 → 원문 미리보기로 폴백")
