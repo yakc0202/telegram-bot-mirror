@@ -903,9 +903,17 @@ def _is_generic_telegram_channel_link(url: str) -> bool:
     return bool(re.fullmatch(r"t\.me/[A-Za-z0-9_]+/?", url))
 
 
+def _is_site_root_link(url: str) -> bool:
+    """'dashboard.example.com'처럼 경로 없이 사이트 첫 화면만 가리키는 링크인지 확인.
+    정기 리포트가 매 회차 끝에 같은 대시보드·홈페이지 주소를 붙이면, 날짜가 다른 두 회차가
+    '같은 URL을 공유한다'고 오인되어 양식 유사도만으로 중복 처리됨. 특정 기사·게시물을
+    가리키지 않으므로 같은 내용의 근거로 쓰지 않음."""
+    return "/" not in url
+
+
 def extract_urls(original_text: str) -> set:
     urls = {normalize_url(_strip_trailing_url_punctuation(u)) for u in URL_RE.findall(original_text)}
-    return {u for u in urls if not _is_generic_telegram_channel_link(u)}
+    return {u for u in urls if not _is_generic_telegram_channel_link(u) and not _is_site_root_link(u)}
 
 
 # ── 잡담(주식과 무관한 대화) 필터링용 ──
@@ -2663,6 +2671,14 @@ def is_duplicate(text: str, source_label: str = "", source_link: str = "") -> Op
             # '(15시 07분) 기준'과 '(19시 11분) 기준'은 고정 섹션 이모지·서명이 반복되고
             # 상위 키워드(반도체, 삼성전자 등)도 자주 겹쳐서 유사도가 높게 나올 수 있지만,
             # 기준 시각이 다르면 센티먼트 점수·종목·인기글이 전혀 다른 별개 리포트이므로 제외
+            continue
+        if (
+            current_deep_analysis_time
+            and current_deep_analysis_time == entry_deep_analysis_time
+            and datetime.now(timezone.utc) - entry["time"] > timedelta(hours=12)
+        ):
+            # 매일 같은 시각(예: 19시 07분)에 오는 리포트는 기준 시각 라벨이 같아도, 12시간
+            # 넘게 지난 것은 전날 회차이므로 제외(중복 확인 기간이 24시간이라 전날 것이 남아 있음)
             continue
         entry_us_earnings_ticker = extract_us_earnings_press_ticker(entry["text"])
         if (
