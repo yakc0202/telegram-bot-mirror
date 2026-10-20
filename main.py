@@ -282,7 +282,6 @@ _SECRET_PATTERNS = [
     (re.compile(r"([?&](?:key|api_key|token)=)[^&\s'\"]+"), r"\1<SECRET>"),
     (re.compile(r"AIza[0-9A-Za-z_-]{30,}"), "<GEMINI_KEY>"),
     (re.compile(r"sk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}"), "<API_KEY>"),
-    (re.compile(r"nvapi-[A-Za-z0-9_-]{20,}"), "<NVIDIA_KEY>"),
 ]
 
 
@@ -329,13 +328,6 @@ OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash")
-
-# NVIDIA build.nvidia.com(NIM, OpenAI 호환) — Gemini가 실패할 때만 쓰는 폴백용
-# (LLM_FALLBACK_PROVIDERS=nvidia). 무료 키는 분당 약 40회라 NVIDIA_RPM으로 직접 제한함.
-NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY")
-NVIDIA_MODEL = os.environ.get("NVIDIA_MODEL", "")
-NVIDIA_BASE_URL = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
-NVIDIA_RPM = int(os.environ.get("NVIDIA_RPM", 35))
 
 # 여러 개의 Gemini API 키를 콤마로 등록하면, 요청마다 순서를 돌려가며 사용하고
 # 특정 키가 실패(rate limit 등)하면 같은 호출 안에서 자동으로 다음 키를 시도함.
@@ -1215,39 +1207,6 @@ def _call_openai(prompt: str, max_tokens: int) -> str:
     return resp.json()["choices"][0]["message"]["content"].strip()
 
 
-_nvidia_call_times: list = []
-
-
-def _call_nvidia(prompt: str, max_tokens: int) -> str:
-    now = time.monotonic()
-    _nvidia_call_times[:] = [t for t in _nvidia_call_times if now - t < 60]
-    if len(_nvidia_call_times) >= NVIDIA_RPM:
-        # 처리 잠금을 쥔 채 기다리지 않도록 바로 실패 처리
-        raise RuntimeError(f"NVIDIA 분당 한도({NVIDIA_RPM}) 도달")
-    if not NVIDIA_MODEL:
-        raise RuntimeError("NVIDIA_MODEL 없음")
-    _throttle_llm_calls()
-    _nvidia_call_times.append(now)
-    resp = requests.post(
-        f"{NVIDIA_BASE_URL}/chat/completions",
-        headers={"Authorization": f"Bearer {NVIDIA_API_KEY}"},
-        json={
-            "model": NVIDIA_MODEL,
-            "max_tokens": max_tokens,
-            "temperature": 0.2,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=30,
-    )
-    resp.raise_for_status()
-    content = (resp.json()["choices"][0]["message"].get("content") or "").strip()
-    # 추론형 모델이 <think>…</think>를 앞에 붙이는 경우 제거
-    content = re.sub(r"^<think>.*?</think>\s*", "", content, flags=re.S).strip()
-    if not content:
-        raise RuntimeError("NVIDIA 빈 응답")
-    return content
-
-
 _gemini_key_counter = 0
 
 
@@ -1387,10 +1346,6 @@ def _dispatch_llm_call(provider: str, prompt: str, max_tokens: int) -> str:
         if not OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY 없음")
         return _call_openai(prompt, max_tokens)
-    elif provider == "nvidia":
-        if not NVIDIA_API_KEY:
-            raise RuntimeError("NVIDIA_API_KEY 없음")
-        return _call_nvidia(prompt, max_tokens)
     elif provider == "gemini":
         if not GEMINI_API_KEYS:
             raise RuntimeError("GEMINI_API_KEY(S) 없음")

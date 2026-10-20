@@ -20,12 +20,15 @@ git -C "$MIRROR" clean -fdq
 restore() { git -C "$MIRROR" checkout -q -f main; git -C "$MIRROR" reset -q --hard origin/main; git -C "$MIRROR" clean -fdq; }
 
 python3 - "$SRC" "$MIRROR" "$ENV_FILE" <<'PY' || { restore; exit 1; }
-import re, shutil, subprocess, sys
+import re, shutil, subprocess, sys, unicodedata
 from pathlib import Path
 src, mirror, env_file = map(Path, sys.argv[1:])
 
 # 공개하지 않는 파일
-EXCLUDE = {'SYNC.md'}  # 지금 상태 요약(운영 맥락)
+EXCLUDE = {
+    'SYNC.md',                            # 지금 상태 요약(운영 맥락)
+    'docs/테스트/메시지-요약-테스트.md',  # 감시 채널 원문·채널 이름이 들어 있음
+}
 # 경로를 바꿔 내보내는 파일: 미러에서 워크플로가 실행되지 않게 참고용으로만 둔다
 RENAME = {'.github/workflows/deploy.yml': 'docs/deploy.yml.reference'}
 # 미러에만 있는 파일(지우지 않음)
@@ -75,7 +78,7 @@ generic = [
 ALLOW = {'-1001234567890'}  # 코드 주석의 예시 ID
 
 tracked = [f for f in subprocess.run(['git', 'ls-files', '-z'], cwd=src, capture_output=True,
-           check=True).stdout.decode().split('\0') if f and f not in EXCLUDE]
+           check=True).stdout.decode().split('\0') if f and unicodedata.normalize('NFC', f) not in EXCLUDE]
 targets = {f: RENAME.get(f, f) for f in tracked}
 keep = set(targets.values()) | MIRROR_ONLY
 for p in list(mirror.rglob('*')):
