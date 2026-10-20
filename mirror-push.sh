@@ -5,6 +5,8 @@
 # 가릴 값은 ~/.config/telegram-bot/.env 에서 직접 읽는다(토큰·키·해시·전화번호·채팅방 ID).
 # 값 목록 파일을 따로 두지 않으므로 실제 값은 어떤 저장소에도 커밋되지 않는다.
 # 가린 뒤에도 보안 값 모양이 남아 있으면 커밋·push 없이 멈춘다.
+# 작업 트리가 아니라 커밋된 HEAD 내용을 내보낸다(커밋 안 한 수정은 미러에 안 나감).
+# .env.example 은 미러에만 있으므로 고칠 때는 미러 저장소에서 직접 커밋한다(이 스크립트가 미러 작업본을 초기화함).
 set -eu
 MODE=${1:---check}
 case "$MODE" in --check|--push) ;; *) echo "알 수 없는 옵션: $MODE"; exit 1 ;; esac
@@ -20,7 +22,7 @@ git -C "$MIRROR" clean -fdq
 restore() { git -C "$MIRROR" checkout -q -f main; git -C "$MIRROR" reset -q --hard origin/main; git -C "$MIRROR" clean -fdq; }
 
 python3 - "$SRC" "$MIRROR" "$ENV_FILE" <<'PY' || { restore; exit 1; }
-import re, shutil, subprocess, sys, unicodedata
+import re, subprocess, sys, unicodedata
 from pathlib import Path
 src, mirror, env_file = map(Path, sys.argv[1:])
 
@@ -78,8 +80,14 @@ generic = [
 ]
 ALLOW = {'-1001234567890'}  # 코드 주석의 예시 ID
 
-tracked = [f for f in subprocess.run(['git', 'ls-files', '-z'], cwd=src, capture_output=True,
-           check=True).stdout.decode().split('\0') if f and unicodedata.normalize('NFC', f) not in EXCLUDE]
+# 커밋된 HEAD 기준 파일 목록과 실행 권한
+modes = {}
+for row in subprocess.run(['git', 'ls-tree', '-r', '-z', 'HEAD'], cwd=src, capture_output=True,
+                          check=True).stdout.decode().split('\0'):
+    if row:
+        meta, f = row.split('\t', 1)
+        modes[f] = meta.split()[0]
+tracked = [f for f in modes if unicodedata.normalize('NFC', f) not in EXCLUDE]
 targets = {f: RENAME.get(f, f) for f in tracked}
 keep = set(targets.values()) | MIRROR_ONLY
 for p in list(mirror.rglob('*')):
@@ -91,7 +99,9 @@ leaks, masked = [], 0
 for name, out in targets.items():
     dst = mirror / out
     dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src / name, dst)
+    dst.write_bytes(subprocess.run(['git', 'show', f'HEAD:{name}'], cwd=src, capture_output=True,
+                                   check=True).stdout)
+    dst.chmod(0o755 if modes[name] == '100755' else 0o644)
     if name == 'REQUESTS.md':
         dst.write_text(public_requests(dst.read_text(encoding='utf-8')), encoding='utf-8')
     data = dst.read_bytes()
