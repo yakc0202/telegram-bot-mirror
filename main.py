@@ -3803,7 +3803,13 @@ async def main():
                 try:
                     await client.send_read_acknowledge(chat_entity, max_id=max_msg_id)
                 except Exception as e:
-                    log.info(f"감시 채널 읽음 처리 실패(무시하고 계속, chat={chat_key}): {e}")
+                    # 실패분은 대기열에 되돌려 다음 주기에 다시 보냄(예방 재연결 직후 끊긴 순간에
+                    # 걸리면 그대로 버려져 감시 채널에 안 읽은 메시지가 남았음). 그사이 더 큰 id가
+                    # 들어왔으면 그쪽을 유지.
+                    prev = pending_read_acks.get(chat_key)
+                    if prev is None or max_msg_id > prev[1]:
+                        pending_read_acks[chat_key] = (chat_entity, max_msg_id)
+                    log.info(f"감시 채널 읽음 처리 실패(다음 주기에 재시도, chat={chat_key}): {e}")
 
     _spawn(_read_ack_flush_loop())
     log.info("감시 채널 읽음 처리 루프 활성화됨 (20초마다 모아서 채널당 한 번씩 전송)")
