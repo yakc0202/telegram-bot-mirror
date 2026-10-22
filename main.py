@@ -1327,6 +1327,25 @@ def _mark_gemini_key_exhausted(key: str):
     _gemini_key_recent_calls[key] = [now] * GEMINI_PER_KEY_RPM
 
 
+def _gemini_error_detail(e: Exception) -> str:
+    """Gemini 오류 응답 본문에서 어떤 한도(quotaId)·한도값·재시도 권장 시간·서버 메시지인지 뽑아 짧게 반환.
+    429가 분당/일 한도 중 무엇인지, 503이 어떤 사유인지 로그만 보고 구분하려는 용도. 본문이 없으면 빈 문자열."""
+    resp = getattr(e, "response", None)
+    if resp is None:
+        return ""
+    try:
+        err = resp.json().get("error", {})
+    except ValueError:
+        return f" [본문: {resp.text[:150]!r}]"
+    parts = [f"{err.get('status', '')}: {str(err.get('message', ''))[:150]}"]
+    for d in err.get("details", []):
+        for v in d.get("violations", []):
+            parts.append(f"quotaId={v.get('quotaId')} 한도={v.get('quotaValue')}")
+        if d.get("retryDelay"):
+            parts.append(f"retryDelay={d['retryDelay']}")
+    return " [" + ", ".join(parts) + "]"
+
+
 def _call_gemini(prompt: str, max_tokens: int) -> str:
     keys = _gemini_keys_rotated()
     if not keys:
@@ -1361,7 +1380,7 @@ def _call_gemini(prompt: str, max_tokens: int) -> str:
         except Exception as e:
             last_error = e
             _mark_gemini_key_exhausted(key)
-            log.info(f"Gemini 키 #{idx+1} 호출 실패, 다음 키 시도: {e}")
+            log.info(f"Gemini 키 #{idx+1} 호출 실패, 다음 키 시도: {e}{_gemini_error_detail(e)}")
             continue
 
     # 모든 키가 당장은 여유가 없는 상태 → 가장 빨리 회복되는 키 하나만 골라서, 그만큼만
@@ -1403,7 +1422,7 @@ def _call_gemini(prompt: str, max_tokens: int) -> str:
         except Exception as e:
             last_error = e
             _mark_gemini_key_exhausted(soonest_key)
-            log.info(f"대기 후 재시도도 실패: {e}")
+            log.info(f"대기 후 재시도도 실패: {e}{_gemini_error_detail(e)}")
 
     raise last_error
 
