@@ -197,6 +197,6 @@ if [ "$MODE" = --check ]; then
   restore; echo "미리보기만 함 — push 안 함. 확인 후 --push"; exit 0
 fi
 if git -C "$MIRROR" diff --cached --quiet; then echo "mirror: 변경 없음"; exit 0; fi
-git -C "$MIRROR" commit -q -F "$MSG_FILE"
+git -C "$MIRROR" -c user.name="황민영" -c user.email=yakc0202@gmail.com commit -q -F "$MSG_FILE"  # 미러 작성자는 하나로
 git -C "$MIRROR" push -q origin main
 echo "mirror push 완료: $(git -C "$MIRROR" log -1 --oneline)"
