@@ -1327,6 +1327,13 @@ def _mark_gemini_key_exhausted(key: str):
     _gemini_key_recent_calls[key] = [now] * GEMINI_PER_KEY_RPM
 
 
+def _is_gemini_rate_limited(e: Exception) -> bool:
+    """429(키 한도 초과)만 True. 503(서버 과부하)·timeout은 키 문제가 아니라 다음 키도 같은 서버로 가므로,
+    그 키를 60초 막으면 몰리는 시간에 쓸 키만 줄어듦. 실패한 호출도 분당 사용량에는 이미 세어 둠."""
+    resp = getattr(e, "response", None)
+    return resp is not None and resp.status_code == 429
+
+
 def _gemini_error_detail(e: Exception) -> str:
     """Gemini 오류 응답 본문에서 어떤 한도(quotaId)·한도값·재시도 권장 시간·서버 메시지인지 뽑아 짧게 반환.
     429가 분당/일 한도 중 무엇인지, 503이 어떤 사유인지 로그만 보고 구분하려는 용도. 본문이 없으면 빈 문자열."""
@@ -1379,7 +1386,8 @@ def _call_gemini(prompt: str, max_tokens: int) -> str:
             return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
         except Exception as e:
             last_error = e
-            _mark_gemini_key_exhausted(key)
+            if _is_gemini_rate_limited(e):
+                _mark_gemini_key_exhausted(key)
             log.info(f"Gemini 키 #{idx+1} 호출 실패, 다음 키 시도: {e}{_gemini_error_detail(e)}")
             continue
 
@@ -1421,7 +1429,8 @@ def _call_gemini(prompt: str, max_tokens: int) -> str:
             return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
         except Exception as e:
             last_error = e
-            _mark_gemini_key_exhausted(soonest_key)
+            if _is_gemini_rate_limited(e):
+                _mark_gemini_key_exhausted(soonest_key)
             log.info(f"대기 후 재시도도 실패: {e}{_gemini_error_detail(e)}")
 
     raise last_error
