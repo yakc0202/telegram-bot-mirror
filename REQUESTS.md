@@ -849,3 +849,52 @@
   - 이 파일에 적힌 미러 해시를 새 해시로 바꿈(원본 저장소 해시는 그대로).
 - 알아둘 점: 미러 해시가 모두 바뀌었고, GitHub Activity에 force-push 기록이 남음. 이미 받아 간 사본은 회수할 수 없음.
   `mirror-push.sh`는 매번 `origin/main`으로 맞추므로 그대로 쓰면 됨.
+
+### 2026-10-23 봇 로그 2026-09-08 FloodWait 32줄 대비 코드 반영
+- 상태: 진행중 (코드 수정·시험·커밋 완료. push·배포는 사용자 확인 대기)
+- FloodWait란: 텔레그램 서버가 "같은 종류 요청을 너무 자주 보냈으니 N초 동안 보내지 마라"고 돌려주는 제한 응답.
+  유저봇(Telethon, MTProto)은 `FloodWaitError`("A wait of N seconds is required (caused by 요청이름)"), 봇 API는 HTTP 429
+  "Too Many Requests: retry after N"(`parameters.retry_after`)으로 온다. 기다리지 않고 또 보내면 대기가 늘어날 수 있다.
+  Telethon은 `flood_sleep_threshold`(기본 60초) 이하 대기는 스스로 자고 다시 보내고, 넘으면 예외를 올린다.
+- 진단(`stderr.log`, 로그 권한 복구 후): 9/8 FloodWait 줄은 30줄, 전부 14:44~15:00. 14:37 텔레그램 서버 장애
+  (`-500 No workers running`, GetChannelsRequest) 뒤 Telethon 업데이트 따라잡기가 FloodWait에 걸려 채널 25곳에서
+  "Getting difference for channel updates ... caused FloodWaitError; ending getting difference prematurely"(28줄)
+  + "Cannot get difference ... FloodWaitError"(2줄). 같은 때 우리 코드의 `event.get_chat()`(읽음 처리 등록·원문 링크)이
+  "A wait of 508 seconds is required (caused by GetChannelsRequest)"로 실패. 14:42~15:13 요약 전송 0건(사우디 에너지
+  시설 공격 뉴스가 몰리던 때) → 그 사이 메시지를 실시간으로 못 받은 것으로 보임(채널 원본과 대조는 안 함).
+  같은 때 로그 채널 전송도 429(retry_after 317~578초)로 실패해 버려짐. `[log-shipper] ... 429` 줄은 로그 전체에 787줄
+  (시각 없는 줄이라 날짜별 분포는 못 셈). GetChannelsRequest FloodWait는 8/10에도 2줄.
+- 왜 발생했나: 서버 장애로 업데이트가 끊기자 Telethon이 채널 25곳의 밀린 업데이트를 연달아 요청(GetChannelDifference·
+  GetChannels)했고, 우리 코드도 메시지마다 `event.get_chat()`으로 GetChannelsRequest를 보냄 → 짧은 시간에 같은 요청이 몰려
+  계정에 FloodWait(최대 508초)가 걸린 것으로 보임(어느 쪽 요청이 한도를 넘겼는지는 로그로 구분 안 됨). Telethon은 이때 따라잡기를 포기하고, 우리 코드는 FloodWait를 따로 다루지 않아 그대로 실패 처리.
+  같은 시각 경고 로그가 한꺼번에 쏟아져 로그 채널 봇도 429.
+- 처리: "봇 로그에 2026-09-08 FloodWait 기록이 32줄-이거 대비 코드 반영" → "재개" → "재개" → "flood wait가 뭔지 왜 발생했는지 이번에 어떻게 수정했는지
+  자세히 적어있는지 확인하고 push"(위 "FloodWait란"·"왜 발생했나" 추가). `main.py`:
+  - 감시 채널 엔티티 표 `source_entity_by_id`(`telethon_utils.get_peer_id`) + `_event_chat(event)`: 읽음 처리 등록·원문 링크가
+    메시지마다 `event.get_chat()`(GetChannelsRequest)을 부르지 않게 함.
+  - Telethon 업데이트 공백 복구: `_UpdateGapWatcher`(telethon 로거에서 "FloodWaitError"+"difference" 줄 감지 →
+    `_update_gap`) + `_gap_recovery_loop`(마지막 감지 후 `UPDATE_GAP_RECOVERY_DELAY`(600초) 조용하면 공백 시작 5분 전부터
+    감시 채널을 `iter_messages(offset_date=...)`로 다시 훑어 `processed_message_ids`에 없는 메시지만 처리, 채널 사이 2초).
+    하한은 `watch_started_at`(이번 실행 시작)과 `PROCESSED_ID_RETENTION_HOURS` — 그 전 메시지는 처리 여부를 알 수 없음.
+  - catch-up 처리부를 `_process_fetched_messages`로 빼서 공백 복구와 함께 씀. 처리 전 `processed_message_ids`에 표시,
+    워터마크는 뒤로 돌리지 않음.
+  - FloodWait·429 공통: `FloodWaitError` import, `FLOOD_SLEEP_THRESHOLD`(60)·`FLOOD_WAIT_MAX_SECONDS`(900),
+    `_flood_until`(user/bot별 대기 종료 시각)·`_flood_wait_remaining`·`_note_flood_wait`·`_bot_api_retry_after`·
+    `_call_with_flood_wait`(FloodWait면 기다렸다 재시도, 최대 3회)·`_send_bot_with_flood_retry`.
+    `TelegramClient(..., flood_sleep_threshold=FLOOD_SLEEP_THRESHOLD)`.
+  - 시작 단계 `get_dialogs`·`get_entity`: 시간 제한 없이 기다림(예외로 죽으면 launchd 재시작 → 같은 요청 반복 고리).
+  - catch-up `get_messages`·`iter_messages`: FloodWait면 기다렸다 재시도.
+  - `_retry_send_queue_loop`: 대기 중이면 주기 건너뜀, FloodWait·429 실패는 시도 횟수를 올리지 않고 중단
+    (전엔 30초마다 두드려 20회 차면 메시지를 포기·삭제).
+  - `_read_ack_flush_loop`: 대기 중이면 건너뜀, FloodWait면 대기 시각 기록.
+  - 봇 API: `send_bot_notification`은 대기 중이면 요청 없이 None(→ 재전송 큐), 429면 대기 기록. 사진·앨범·
+    `send_bot_message_raw`·`send_html_document`도 429 기록. 정리 텍스트·HTML은 `_send_bot_with_flood_retry`로 429 시 기다렸다
+    한 번 더. 유저봇 정리 전송은 `_call_with_flood_wait`.
+  - `_log_shipper_loop`: 429면 retry_after만큼 기다렸다 같은 조각 재전송(전엔 버림), 조각이 여러 개면 3초 간격.
+  - `AGENTS.md` "텔레그램 FloodWait" 규칙.
+- 시험: `py_compile`·pyflakes(새 경고 없음) 통과. 가짜 FloodWait/429 5건 통과(2초 대기 후 재시도 성공, 5000초는 바로 실패,
+  retry_after 파싱, 정리 전송 429 후 재시도 성공, 대기 중 봇 전송은 요청 없이 None). 공백 감지기: 실제 Telethon 문구 2종 감지,
+  무관한 서버 오류 줄 무시, 첫 감지 시각 유지. 엔티티 표 키가 `-100…` 형태(`event.chat_id`와 같음) 확인.
+  공백 복구 루프 자체는 실제 FloodWait 없이는 재현 못 해 실행 시험 안 함 — 다음 서버 장애 때 "[공백 복구]" 로그로 확인.
+- 남은 일: push(배포·재시작) 사용자 확인 → `./mirror-push.sh --push` → 미러 `.env.example`에 `FLOOD_SLEEP_THRESHOLD`·
+  `FLOOD_WAIT_MAX_SECONDS`·`UPDATE_GAP_RECOVERY_DELAY` 추가.

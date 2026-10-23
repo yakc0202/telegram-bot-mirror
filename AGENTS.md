@@ -163,6 +163,15 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
 - `is_duplicate()`는 `llm_processing_lock`을 쥐고 실행되므로 대기는
   `GEMINI_MAX_COOLDOWN_WAIT`(기본 5초)까지만. 넘으면 실패 처리(→ "다른 정보").
 
+### 텔레그램 FloodWait
+
+- 유저봇 `FloodWaitError`·봇 API 429(`retry_after`)는 `_flood_until`에 대기 종료 시각을 적고, 그 전에는 재전송 큐·읽음 처리를 건너뛴다(재전송 큐 시도 횟수도 안 올림).
+- 시작 단계(`get_dialogs`·`get_entity`)는 `_call_with_flood_wait(max_wait=None)`으로 끝까지 기다린다. 새 Telethon 호출을 넣으면 같은 래퍼를 쓴다.
+- 봇 API 전송 함수는 이벤트 루프에서 동기로 불리므로 안에서 sleep하지 않는다. 재전송 큐가 없는 전송(정리)은 `_send_bot_with_flood_retry`로 감싼다.
+- 감시 채널 엔티티는 `_event_chat(event)`(시작 때 만든 표)로 얻는다. 메시지마다 `event.get_chat()`을 부르지 않는다.
+- Telethon이 업데이트 따라잡기를 FloodWait로 포기하면 `_gap_recovery_loop`가 그 구간을 `processed_message_ids` 기준으로 다시 훑는다.
+- 튜닝: `FLOOD_SLEEP_THRESHOLD`(60, Telethon 자동 대기 한도), `FLOOD_WAIT_MAX_SECONDS`(900), `UPDATE_GAP_RECOVERY_DELAY`(600).
+
 ### SQLite
 
 - `text_factory`는 `errors="replace"`.

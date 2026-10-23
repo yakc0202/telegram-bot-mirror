@@ -49,6 +49,8 @@ else:
 from dotenv import load_dotenv
 from pathlib import Path
 from telethon import TelegramClient, events
+from telethon.errors import FloodWaitError
+from telethon import utils as telethon_utils
 from telethon.tl.types import MessageMediaWebPage, WebPage, MessageMediaPoll, MessageMediaPhoto
 from anthropic import Anthropic
 import requests
@@ -100,6 +102,82 @@ class _TelegramQueueLogHandler(logging.Handler):
             pass  # 로그 전송 실패가 로그를 또 남기는 무한루프를 막기 위해 조용히 무시
 
 
+# ── 텔레그램 FloodWait 대응 ──
+# 유저봇(Telethon)은 FloodWaitError, 봇 API는 429 + parameters.retry_after로 "N초 기다려라"를 알린다.
+# 기다리는 동안 같은 쪽으로 또 보내면 대기가 늘어나므로, 끝나는 시각을 기억해 두고 그 전에는
+# 백그라운드 전송(재전송 큐·읽음 처리·로그 전송)을 건너뛴다. 재전송 큐는 시도 횟수도 올리지 않는다.
+# Telethon은 FLOOD_SLEEP_THRESHOLD초 이하 대기는 스스로 기다렸다가 다시 보낸다.
+FLOOD_SLEEP_THRESHOLD = int(os.environ.get("FLOOD_SLEEP_THRESHOLD", 60))
+FLOOD_WAIT_MAX_SECONDS = int(os.environ.get("FLOOD_WAIT_MAX_SECONDS", 900))  # 이보다 길면 기다리지 않고 실패 처리
+_flood_until = {"user": 0.0, "bot": 0.0}  # 종류별 대기 종료 시각(time.monotonic 기준)
+
+
+def _flood_wait_remaining(kind: str) -> float:
+    return max(0.0, _flood_until[kind] - time.monotonic())
+
+
+def _note_flood_wait(kind: str, seconds: float) -> None:
+    _flood_until[kind] = max(_flood_until[kind], time.monotonic() + seconds + 1)
+
+
+def _bot_api_retry_after(resp) -> Optional[int]:
+    """봇 API 응답이 429면 retry_after(초), 아니면 None."""
+    if resp is None or resp.status_code != 429:
+        return None
+    try:
+        return int(resp.json().get("parameters", {}).get("retry_after", 0)) or None
+    except Exception:
+        return None
+
+
+async def _call_with_flood_wait(make_call, label: str, max_wait: Optional[int] = FLOOD_WAIT_MAX_SECONDS, attempts: int = 3):
+    """make_call()(코루틴을 돌려주는 함수)을 실행하고, FloodWaitError면 요구한 만큼 기다렸다가 다시 시도.
+    max_wait보다 긴 대기를 요구하거나 시도를 다 쓰면 FloodWaitError를 그대로 올린다(None이면 무제한 대기)."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return await make_call()
+        except FloodWaitError as e:
+            _note_flood_wait("user", e.seconds)
+            if attempt == attempts or (max_wait is not None and e.seconds > max_wait):
+                raise
+            log.warning(f"FloodWait {e.seconds}초({label}) → 기다렸다가 다시 시도 ({attempt}/{attempts - 1})")
+            await asyncio.sleep(e.seconds + 1)
+
+
+# Telethon은 업데이트 따라잡기(GetChannelDifference)가 FloodWait에 걸리면 그 채널의 따라잡기를 포기하고
+# 넘어간다(그 사이 메시지는 실시간으로 오지 않음). 그 로그를 보고 공백이 시작된 시각을 적어 두면
+# _gap_recovery_loop가 대기가 끝난 뒤 그 시각부터 감시 채널을 다시 훑는다.
+UPDATE_GAP_RECOVERY_DELAY = int(os.environ.get("UPDATE_GAP_RECOVERY_DELAY", 600))  # 마지막 감지 후 이만큼 조용하면 다시 훑음
+_update_gap = {"since": None, "last_seen": 0.0}  # since: 공백 시작(UTC), last_seen: 마지막 감지(time.monotonic)
+
+
+class _UpdateGapWatcher(logging.Handler):
+    def emit(self, record):
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return
+        if "FloodWaitError" in msg and "difference" in msg:
+            if _update_gap["since"] is None:
+                _update_gap["since"] = datetime.now(timezone.utc)
+            _update_gap["last_seen"] = time.monotonic()
+
+
+logging.getLogger("telethon").addHandler(_UpdateGapWatcher())
+
+
+async def _send_bot_with_flood_retry(send, *args):
+    """봇 API 동기 전송 함수(send_bot_message_raw 등)를 부르고, 429로 실패했으면 요구한 시간만큼
+    기다렸다가 한 번 더 보낸다. 정리처럼 재전송 큐가 없는 전송에 쓴다."""
+    msg_id = send(*args)
+    remaining = _flood_wait_remaining("bot")
+    if not msg_id and 0 < remaining <= FLOOD_WAIT_MAX_SECONDS:
+        log.warning(f"봇 API 429 → {remaining:.0f}초 기다렸다가 다시 전송")
+        await asyncio.sleep(remaining)
+        msg_id = send(*args)
+    return msg_id
+
+
 async def _log_shipper_loop(queue_getter, bot_token: str, chat_id):
     """큐에 쌓인 로그를 몇 초 간격으로 모아서 지정된 채널로 전송하는 백그라운드 루프."""
     import sys as _sys  # log.* 호출로 인한 재귀를 피하려고 stderr에 직접 출력
@@ -123,23 +201,34 @@ async def _log_shipper_loop(queue_getter, bot_token: str, chat_id):
         chunk_size = 3900
         chunks = [combined[i:i + chunk_size] for i in range(0, len(combined), chunk_size)]
         for chunk in chunks:
-            try:
-                resp = await asyncio.to_thread(
-                    requests.post,
-                    f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                    json={
-                        "chat_id": chat_id,
-                        "text": f"<pre>{html.escape(chunk)}</pre>",
-                        "parse_mode": "HTML",
-                        "disable_web_page_preview": True,
-                        "disable_notification": True,  # 로그는 알림 없이 조용히 쌓이도록
-                    },
-                    timeout=15,
-                )
-                if resp.status_code != 200:
-                    print(f"[log-shipper] 로그 전송 실패: {resp.status_code} {resp.text}", file=_sys.stderr)
-            except Exception as e:
-                print(f"[log-shipper] 로그 전송 중 예외 발생: {e}", file=_sys.stderr)
+            # 429(retry_after)를 받으면 그만큼 기다렸다가 같은 조각을 다시 보낸다(버리지 않음).
+            for _ in range(3):
+                try:
+                    resp = await asyncio.to_thread(
+                        requests.post,
+                        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": f"<pre>{html.escape(chunk)}</pre>",
+                            "parse_mode": "HTML",
+                            "disable_web_page_preview": True,
+                            "disable_notification": True,  # 로그는 알림 없이 조용히 쌓이도록
+                        },
+                        timeout=15,
+                    )
+                    retry_after = _bot_api_retry_after(resp)
+                    if retry_after:
+                        print(f"[log-shipper] 429 → {retry_after}초 기다렸다가 다시 전송", file=_sys.stderr)
+                        await asyncio.sleep(retry_after + 1)
+                        continue
+                    if resp.status_code != 200:
+                        print(f"[log-shipper] 로그 전송 실패: {resp.status_code} {resp.text}", file=_sys.stderr)
+                except Exception as e:
+                    print(f"[log-shipper] 로그 전송 중 예외 발생: {e}", file=_sys.stderr)
+                break
+            # 봇 API는 한 채팅방에 분당 20건 안팎까지만 받으므로, 조각이 많을 때 몰아 보내지 않는다.
+            if len(chunks) > 1:
+                await asyncio.sleep(3)
 
 
 DB_PATH = os.environ.get("DB_PATH", "dedup_history.db")
@@ -2842,6 +2931,9 @@ async def send_media_to_summary_chat(
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     if TELEGRAM_BOT_TOKEN:
+        if _flood_wait_remaining("bot") > 0:
+            log.warning(f"봇 API 429 대기 중 → 이미지/미디어 전송 건너뜀 [채널: {source_label}]")
+            return None
         tmp_path = None
         try:
             # 메모리에 통째로 올리는 대신 임시 파일로 다운로드 → 디스크에서 스트리밍 업로드.
@@ -2869,6 +2961,9 @@ async def send_media_to_summary_chat(
                     )
             if resp.status_code == 200:
                 return resp.json()["result"]["message_id"]
+            retry_after = _bot_api_retry_after(resp)
+            if retry_after:
+                _note_flood_wait("bot", retry_after)
             if resp.status_code == 413:
                 # 봇 API는 업로드 용량이 20MB로 제한돼 있지만, 유저봇 계정으로는 최대 2GB까지
                 # 보낼 수 있음 — 대용량 동영상 등은 재시도해봐야 항상 같은 이유로 실패하므로,
@@ -2915,6 +3010,9 @@ async def send_album_to_summary_chat(
     성공하면 캡션이 붙은 첫 번째 메시지의 id, 실패하면 None."""
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     if TELEGRAM_BOT_TOKEN:
+        if _flood_wait_remaining("bot") > 0:
+            log.warning(f"봇 API 429 대기 중 → 앨범 전송 건너뜀 [채널: {source_label}]")
+            return None
         tmp_paths = []
         open_files = []
         try:
@@ -2955,6 +3053,9 @@ async def send_album_to_summary_chat(
             if resp.status_code == 200:
                 result_list = resp.json()["result"]
                 return result_list[0]["message_id"] if result_list else None
+            retry_after = _bot_api_retry_after(resp)
+            if retry_after:
+                _note_flood_wait("bot", retry_after)
             log.warning(
                 f"봇으로 앨범 전송 실패 [채널: {source_label}, 시각: {now_str}]: "
                 f"{resp.status_code} {resp.text}"
@@ -3253,6 +3354,9 @@ def send_bot_message_raw(chat_id, html_text: str) -> Optional[int]:
         )
         if resp.status_code == 200:
             return resp.json()["result"]["message_id"]
+        retry_after = _bot_api_retry_after(resp)
+        if retry_after:
+            _note_flood_wait("bot", retry_after)
         log.warning(f"봇 메시지 전송 실패: {resp.status_code} {resp.text}")
     except Exception as e:
         log.warning(f"봇 메시지 전송 중 오류: {e}")
@@ -3273,6 +3377,9 @@ def send_html_document(chat_id, html_content: str, filename: str, caption: str =
         )
         if resp.status_code == 200:
             return resp.json()["result"]["message_id"]
+        retry_after = _bot_api_retry_after(resp)
+        if retry_after:
+            _note_flood_wait("bot", retry_after)
         log.warning(f"HTML 문서 전송 실패: {resp.status_code} {resp.text}")
     except Exception as e:
         log.warning(f"HTML 문서 전송 중 오류: {e}")
@@ -3305,11 +3412,23 @@ def send_bot_notification(chat_id, text: str, reply_to_message_id: Optional[int]
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
 
+    # 429 대기 중에는 보내지 않고 실패로 돌려 호출부가 재전송 큐에 넣게 한다(이 함수는 이벤트 루프에서
+    # 동기로 불리므로 여기서 sleep하면 봇 전체가 멈춤).
+    remaining = _flood_wait_remaining("bot")
+    if remaining > 0:
+        log.warning(f"봇 API 429 대기 중({remaining:.0f}초 남음) → 이번 전송은 건너뜀")
+        return None
+
     resp = _post(payload)
     if resp.status_code == 200:
         return resp.json()["result"]["message_id"]
 
     log.warning(f"봇 알림 전송 실패 (1차): {resp.status_code} {resp.text}")
+
+    retry_after = _bot_api_retry_after(resp)
+    if retry_after:
+        _note_flood_wait("bot", retry_after)
+        return None
 
     # reply_to_message_id가 원인일 수 있으니, 답장 없이 한 번 더 시도
     if reply_to_message_id:
@@ -3352,7 +3471,7 @@ async def main():
         _spawn(_log_shipper_loop(lambda: _log_queue_warning, LOG_BOT_TOKEN, LOG_CHAT_WARNING))
         log.info(f"WARNING+ 로그 전송 활성화됨 → LOG_CHAT_WARNING={LOG_CHAT_WARNING}")
 
-    client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
+    client = TelegramClient(SESSION_PATH, API_ID, API_HASH, flood_sleep_threshold=FLOOD_SLEEP_THRESHOLD)
     await client.start(phone=PHONE)
     log.info("텔레그램 로그인 완료")
 
@@ -3368,14 +3487,19 @@ async def main():
 
     # 숫자 ID로 지정된 채널/그룹을 찾으려면 먼저 전체 대화방 목록을 한 번
     # 불러와서 내부 캐시에 저장해둬야 함 (안 하면 ID로 조회 시 못 찾는 에러 발생)
+    # 시작 단계의 FloodWait는 길어도 기다린다. 예외로 죽으면 launchd가 바로 다시 띄워 같은 요청을
+    # 반복하므로 대기가 더 길어진다.
     log.info("대화방 목록 캐싱 중...")
-    await client.get_dialogs(limit=None)
+    await _call_with_flood_wait(lambda: client.get_dialogs(limit=None), "대화방 목록", max_wait=None)
 
     source_entities = []
     for chat in SOURCE_CHATS:
-        entity = await client.get_entity(chat)
+        entity = await _call_with_flood_wait(lambda: client.get_entity(chat), f"감시 대상 {chat}", max_wait=None)
         source_entities.append(entity)
         log.info(f"감시 대상 등록: {chat}")
+    # event.chat_id(-100 접두어 형태) → 엔티티. event.get_chat()은 캐시에 없으면 메시지마다
+    # GetChannelsRequest를 보내고, 서버 장애 뒤에는 이게 몇 분짜리 FloodWait로 돌아온다.
+    source_entity_by_id = {telethon_utils.get_peer_id(e): e for e in source_entities}
 
     # 봇 토큰이 있어도 유저봇(Telethon) 계정으로 직접 보내는 경로(대용량 미디어가 봇 API의
     # 20MB 제한(413)에 걸렸을 때 폴백 등)가 필요해서, 모드와 무관하게 항상 엔티티를 확보해둠.
@@ -3384,8 +3508,11 @@ async def main():
     summary_entity = None
     digest_entity = None
     try:
-        summary_entity = await client.get_entity(DIGEST_CHAT)
-        digest_entity = await client.get_entity(SUMMARY_CHAT) if SUMMARY_CHAT != DIGEST_CHAT else summary_entity
+        summary_entity = await _call_with_flood_wait(lambda: client.get_entity(DIGEST_CHAT), "요약 채널", max_wait=None)
+        digest_entity = (
+            await _call_with_flood_wait(lambda: client.get_entity(SUMMARY_CHAT), "정리 채널", max_wait=None)
+            if SUMMARY_CHAT != DIGEST_CHAT else summary_entity
+        )
     except Exception as e:
         if not TELEGRAM_BOT_TOKEN:
             raise
@@ -3426,6 +3553,8 @@ async def main():
                 sent_msg = await client.send_message(summary_entity, body)
                 msg_id = sent_msg.id
         except Exception as e:
+            if isinstance(e, FloodWaitError):
+                _note_flood_wait("user", e.seconds)
             log.warning(f"요약 채널 전송 중 예외 발생: {e}")
             msg_id = None
 
@@ -3597,7 +3726,7 @@ async def main():
             else:
                 digest_body_html = html.escape(digest_clean)
             html_text = f"{html.escape(header)}\n\n<blockquote>{digest_body_html}</blockquote>"
-            sent_msg_id = send_bot_message_raw(SUMMARY_CHAT, html_text)
+            sent_msg_id = await _send_bot_with_flood_retry(send_bot_message_raw, SUMMARY_CHAT, html_text)
             if sent_msg_id:
                 log.info("정리(텍스트) 전송 완료")
                 # 사용자에게 실제로 전달되는 핵심 순간은 텍스트 요약 전송 시점이므로, 그 직후
@@ -3619,13 +3748,15 @@ async def main():
                 # 보낸 날이 아니라 회차 날짜(늦게 보내도 원래 회차 날짜로 남음).
                 ampm_label = "오전" if end_hour < 12 else "오후"
                 html_filename = f"{ampm_label}_정리_{slot_end_kst.strftime('%Y%m%d')}.html"
-                html_msg_id = send_html_document(SUMMARY_CHAT, digest_html_doc, html_filename)
+                html_msg_id = await _send_bot_with_flood_retry(send_html_document, SUMMARY_CHAT, digest_html_doc, html_filename)
                 if html_msg_id:
                     log.info("정리(HTML 파일) 전송 완료")
                 else:
                     log.warning("정리(HTML 파일) 전송 실패")
         else:
-            sent_msg = await client.send_message(digest_entity, f"{header}\n\n{digest_clean}")
+            sent_msg = await _call_with_flood_wait(
+                lambda: client.send_message(digest_entity, f"{header}\n\n{digest_clean}"), "정리 전송"
+            )
             sent_msg_id = sent_msg.id
             log.info("정리 전송 완료(유저봇)")
             await asyncio.to_thread(set_digest_sent_time, end_hour, slot_end_kst.isoformat())
@@ -3736,6 +3867,10 @@ async def main():
                 continue
             if not rows:
                 continue
+            flood_remaining = max(_flood_wait_remaining("user"), _flood_wait_remaining("bot"))
+            if flood_remaining > 0:
+                log.info(f"재전송 큐 {len(rows)}건 대기 중이나 FloodWait {flood_remaining:.0f}초 남음 → 이번 주기 건너뜀")
+                continue
             log.warning(f"재전송 큐 처리 시작: {len(rows)}건 대기 중")
             for row_id, chat_id, text, attempts, kind, source_chat_id, source_message_id in rows:
                 msg_id = None
@@ -3768,8 +3903,16 @@ async def main():
                             sent_msg = await client.send_message(summary_entity, text)
                             msg_id = sent_msg.id
                 except Exception as e:
+                    if isinstance(e, FloodWaitError):
+                        _note_flood_wait("user", e.seconds)
                     log.warning(f"재전송 큐 처리 중 예외 (id={row_id}): {e}")
                     msg_id = None
+
+                # FloodWait·429로 실패한 건 시도 횟수를 올리지 않고(쌓이면 포기·삭제되므로) 대기가
+                # 끝난 뒤 주기로 미룬다.
+                if not msg_id and max(_flood_wait_remaining("user"), _flood_wait_remaining("bot")) > 0:
+                    log.warning(f"재전송 중 FloodWait 발생 → 남은 건은 대기 후 다시 시도 (id={row_id})")
+                    break
 
                 try:
                     if msg_id:
@@ -3795,7 +3938,7 @@ async def main():
         이유는 위 pending_read_acks 선언부 주석 참고."""
         while True:
             await asyncio.sleep(20)
-            if not pending_read_acks:
+            if not pending_read_acks or _flood_wait_remaining("user") > 0:
                 continue
             batch = list(pending_read_acks.items())
             pending_read_acks.clear()
@@ -3809,6 +3952,8 @@ async def main():
                     prev = pending_read_acks.get(chat_key)
                     if prev is None or max_msg_id > prev[1]:
                         pending_read_acks[chat_key] = (chat_entity, max_msg_id)
+                    if isinstance(e, FloodWaitError):
+                        _note_flood_wait("user", e.seconds)
                     log.info(f"감시 채널 읽음 처리 실패(다음 주기에 재시도, chat={chat_key}): {e}")
 
     _spawn(_read_ack_flush_loop())
@@ -3843,6 +3988,9 @@ async def main():
             f"{NIGHT_DIGEST_END_HOUR:02d}:00 구간을 각각 전송"
         )
 
+    async def _event_chat(event):
+        return source_entity_by_id.get(event.chat_id) or await event.get_chat()
+
     async def process_event(event, album_events: list = None):
         # 감시 채널 메시지를 처리 시작하는 즉시 읽음 처리 대상으로 등록 — 요약이 이미
         # 요약 채널로 전달되니 원본 감시 채널에는 안 읽은 메시지가 계속 쌓이지 않도록 함.
@@ -3854,7 +4002,7 @@ async def main():
         # 재시도 경고가 경고 채널에 스팸처럼 쌓이던 문제가 있었음). 등록 자체도 실패하면
         # 안 되므로 예외를 절대 전파하지 않음.
         try:
-            read_chat = await event.get_chat()
+            read_chat = await _event_chat(event)
             chat_key = getattr(read_chat, "id", None)
             max_msg_id = max(ev.message.id for ev in album_events) if album_events else event.message.id
             if chat_key is not None:
@@ -3914,7 +4062,7 @@ async def main():
 
         # 어느 케이스든(잡담/중복/새 정보) 다 필요하므로 가장 먼저 원문 링크부터 계산
         try:
-            source_chat = await event.get_chat()
+            source_chat = await _event_chat(event)
             source_label = getattr(source_chat, "title", None) or getattr(source_chat, "username", "") or "출처"
             source_username = getattr(source_chat, "username", None)
             if source_username:
@@ -4260,6 +4408,51 @@ async def main():
         async def get_chat(self):
             return await self.message.get_chat()
 
+    async def _process_fetched_messages(missed: list, chat_id) -> int:
+        """iter_messages로 가져온 메시지(오래된 것부터)를 앨범은 묶어서 process_event로 처리하고
+        워터마크를 올린다. 처리한 건수(앨범은 1건)를 돌려준다."""
+        # 공백 복구가 같은 메시지를 다시 처리하지 않도록 처리 표시부터 남긴다.
+        now = datetime.now(timezone.utc)
+        for m in missed:
+            processed_message_ids[(chat_id, m.id)] = now
+        # 앨범(grouped_id 공유)은 묶어서, 나머지는 개별로 처리
+        i = 0
+        processed_count = 0
+        while i < len(missed):
+            msg = missed[i]
+            gid = msg.grouped_id
+            if gid:
+                group = [msg]
+                j = i + 1
+                while j < len(missed) and missed[j].grouped_id == gid:
+                    group.append(missed[j])
+                    j += 1
+                events_group = [_FetchedMessageEvent(m) for m in group]
+                try:
+                    await process_event(events_group[0], album_events=events_group)
+                except Exception as e:
+                    log.error(f"[catch-up] 앨범 처리 중 오류(무시하고 계속): {e}")
+                # 워터마크는 앨범의 '마지막' 메시지 ID까지 넘겨야 함. 첫 장 ID로만
+                # 저장하면, 다음 catch-up이 앨범 이후 메시지들을 전부 "아직 못 봤다"고
+                # 착각해서 이미 정상 처리된 메시지들까지 계속 재처리하는 버그가 있었음
+                # (실제로 겪은 장애: 앨범 뒤에 있던 메시지들이 계속 중복 발송됨).
+                last_processed_msg = group[-1]
+                i = j
+            else:
+                try:
+                    await process_event(_FetchedMessageEvent(msg))
+                except Exception as e:
+                    log.error(f"[catch-up] 메시지 처리 중 오류(무시하고 계속): {e}")
+                last_processed_msg = msg
+                i += 1
+            processed_count += 1
+            # 워터마크는 뒤로 돌리지 않는다(공백 복구는 실시간 처리보다 앞선 메시지를 다룸).
+            async with llm_processing_lock:
+                current = await asyncio.to_thread(get_last_processed_id, chat_id)
+                if current is None or last_processed_msg.id > current:
+                    await asyncio.to_thread(set_last_processed_id, chat_id, last_processed_msg.id)
+        return processed_count
+
     async def _catch_up_missed_messages():
         """서버 중단 등으로 놓쳤을 수 있는 메시지를, 재시작 시 채널별 마지막 처리 지점부터
         지금까지 자동으로 훑어서 처리. 채널을 처음 감시하는 경우(워터마크 없음)는 과거 전체를
@@ -4275,7 +4468,7 @@ async def main():
                 last_id = await asyncio.to_thread(get_last_processed_id, chat_id)
             if last_id is None:
                 try:
-                    latest = await client.get_messages(entity, limit=1)
+                    latest = await _call_with_flood_wait(lambda: client.get_messages(entity, limit=1), "catch-up 최신 메시지")
                     if latest:
                         async with llm_processing_lock:
                             await asyncio.to_thread(set_last_processed_id, chat_id, latest[0].id)
@@ -4285,9 +4478,10 @@ async def main():
                 continue
 
             try:
-                missed = []
-                async for msg in client.iter_messages(entity, min_id=last_id, reverse=True, limit=200):
-                    missed.append(msg)
+                async def _fetch_missed():
+                    return [m async for m in client.iter_messages(entity, min_id=last_id, reverse=True, limit=200)]
+
+                missed = await _call_with_flood_wait(_fetch_missed, "catch-up 메시지 조회")
             except Exception as e:
                 log.warning(f"[catch-up] {getattr(entity, 'title', chat_id)} 메시지 조회 실패: {e}")
                 continue
@@ -4297,48 +4491,59 @@ async def main():
 
             log.warning(f"[catch-up] {getattr(entity, 'title', chat_id)}: 놓친 메시지 {len(missed)}건 발견, 순서대로 처리 시작")
 
-            # 앨범(grouped_id 공유)은 묶어서, 나머지는 개별로 처리
-            i = 0
-            processed_count = 0
-            while i < len(missed):
-                msg = missed[i]
-                gid = msg.grouped_id
-                if gid:
-                    group = [msg]
-                    j = i + 1
-                    while j < len(missed) and missed[j].grouped_id == gid:
-                        group.append(missed[j])
-                        j += 1
-                    events_group = [_FetchedMessageEvent(m) for m in group]
-                    try:
-                        await process_event(events_group[0], album_events=events_group)
-                    except Exception as e:
-                        log.error(f"[catch-up] 앨범 처리 중 오류(무시하고 계속): {e}")
-                    # 워터마크는 앨범의 '마지막' 메시지 ID까지 넘겨야 함. 첫 장 ID로만
-                    # 저장하면, 다음 catch-up이 앨범 이후 메시지들을 전부 "아직 못 봤다"고
-                    # 착각해서 이미 정상 처리된 메시지들까지 계속 재처리하는 버그가 있었음
-                    # (실제로 겪은 장애: 앨범 뒤에 있던 메시지들이 계속 중복 발송됨).
-                    last_processed_msg = group[-1]
-                    i = j
-                else:
-                    try:
-                        await process_event(_FetchedMessageEvent(msg))
-                    except Exception as e:
-                        log.error(f"[catch-up] 메시지 처리 중 오류(무시하고 계속): {e}")
-                    last_processed_msg = msg
-                    i += 1
-                processed_count += 1
-                async with llm_processing_lock:
-                    await asyncio.to_thread(set_last_processed_id, chat_id, last_processed_msg.id)
-
+            processed_count = await _process_fetched_messages(missed, chat_id)
             log.warning(f"[catch-up] {getattr(entity, 'title', chat_id)}: {processed_count}건 처리 완료")
 
+    # 이 시각 이후 메시지는 실시간 핸들러나 catch-up이 processed_message_ids에 남긴다(공백 복구의 하한).
+    watch_started_at = datetime.now(timezone.utc)
     log.info("놓친 메시지 확인(catch-up) 시작...")
     try:
         await _catch_up_missed_messages()
     except Exception as e:
         log.error(f"catch-up 처리 중 예외 발생(무시하고 실시간 감시로 진행): {e}")
     log.info("catch-up 완료, 실시간 감시로 전환")
+
+    async def _recover_update_gap(since: datetime):
+        """since 이후 감시 채널 메시지 중 아직 처리하지 않은 것을 처리. 같은 메시지 판별은
+        processed_message_ids(실시간·catch-up이 함께 채움)로 한다."""
+        for entity in source_entities:
+            chat_id = telethon_utils.get_peer_id(entity)
+            label = getattr(entity, "title", chat_id)
+
+            async def _fetch():
+                return [m async for m in client.iter_messages(entity, offset_date=since, reverse=True, limit=200)]
+
+            try:
+                fetched = await _call_with_flood_wait(_fetch, f"공백 복구 {label}")
+            except Exception as e:
+                log.warning(f"[공백 복구] {label} 메시지 조회 실패: {e}")
+                continue
+            missed = [m for m in fetched if (chat_id, m.id) not in processed_message_ids]
+            if missed:
+                log.warning(f"[공백 복구] {label}: 실시간으로 못 받은 메시지 {len(missed)}건 처리 시작")
+                count = await _process_fetched_messages(missed, chat_id)
+                log.warning(f"[공백 복구] {label}: {count}건 처리 완료")
+            await asyncio.sleep(2)  # 채널 사이 간격(복구 요청이 또 FloodWait를 부르지 않게)
+
+    async def _gap_recovery_loop():
+        while True:
+            await asyncio.sleep(60)
+            since = _update_gap["since"]
+            if since is None or _flood_wait_remaining("user") > 0:
+                continue
+            if time.monotonic() - _update_gap["last_seen"] < UPDATE_GAP_RECOVERY_DELAY:
+                continue
+            _update_gap["since"] = None
+            # processed_message_ids 보관 시간보다 오래됐거나 이번 실행 전 메시지는 이미 처리한 것과 구분할 수 없음
+            oldest = datetime.now(timezone.utc) - timedelta(hours=PROCESSED_ID_RETENTION_HOURS)
+            since = max(since - timedelta(minutes=5), oldest, watch_started_at)
+            log.warning(f"Telethon 업데이트 공백 감지 → {since:%H:%M:%S} UTC 이후 감시 채널 다시 훑기")
+            try:
+                await _recover_update_gap(since)
+            except Exception as e:
+                log.error(f"[공백 복구] 예외(다음 감지 때 다시 시도): {e}")
+
+    _spawn(_gap_recovery_loop())
 
     log.info("실시간 감시 시작. 종료하려면 Ctrl+C")
     while True:
