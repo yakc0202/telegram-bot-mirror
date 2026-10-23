@@ -851,7 +851,7 @@
   `mirror-push.sh`는 매번 `origin/main`으로 맞추므로 그대로 쓰면 됨.
 
 ### 2026-10-23 봇 로그 2026-09-08 FloodWait 32줄 대비 코드 반영
-- 상태: 진행중 (코드 수정·시험·커밋 완료. push·배포는 사용자 확인 대기)
+- 상태: 완료 (10/23 11:33 배포. 공백 복구 동작은 다음 서버 장애 때 확인)
 - FloodWait란: 텔레그램 서버가 "같은 종류 요청을 너무 자주 보냈으니 N초 동안 보내지 마라"고 돌려주는 제한 응답.
   유저봇(Telethon, MTProto)은 `FloodWaitError`("A wait of N seconds is required (caused by 요청이름)"), 봇 API는 HTTP 429
   "Too Many Requests: retry after N"(`parameters.retry_after`)으로 온다. 기다리지 않고 또 보내면 대기가 늘어날 수 있다.
@@ -896,5 +896,10 @@
   retry_after 파싱, 정리 전송 429 후 재시도 성공, 대기 중 봇 전송은 요청 없이 None). 공백 감지기: 실제 Telethon 문구 2종 감지,
   무관한 서버 오류 줄 무시, 첫 감지 시각 유지. 엔티티 표 키가 `-100…` 형태(`event.chat_id`와 같음) 확인.
   공백 복구 루프 자체는 실제 FloodWait 없이는 재현 못 해 실행 시험 안 함 — 다음 서버 장애 때 "[공백 복구]" 로그로 확인.
-- 남은 일: push(배포·재시작) 사용자 확인 → `./mirror-push.sh --push` → 미러 `.env.example`에 `FLOOD_SLEEP_THRESHOLD`·
-  `FLOOD_WAIT_MAX_SECONDS`·`UPDATE_GAP_RECOVERY_DELAY` 추가.
+- 배포: push `9404724` → Actions 성공 → 11:33:42 재시작(감시 채널 19곳 등록, catch-up 정상, 오류 0). 11:41 첫 메시지 처리·
+  요약 전송 정상, 원문 링크·읽음 처리 등록 실패 0(재시작 뒤 8분은 원래 메시지가 없던 때 — 이벤트 루프 대기 상태 확인).
+- 미러: `bd298bf`(mirror-push) + `.env.example`에 `FLOOD_SLEEP_THRESHOLD`·`FLOOD_WAIT_MAX_SECONDS`·`UPDATE_GAP_RECOVERY_DELAY`
+  추가(`66dedb1`). 처음 직접 커밋이 작성자 `young`으로 들어가 바로 작성자만 고쳐 force-push(`4402adb` → `66dedb1`).
+  미러 clone(`~/.cache/telegram-bot-mirror`)의 `user.name`을 미러 작성자로 설정, `AGENTS.md`에 규칙 한 줄.
+- 알아둘 점: 다음 텔레그램 서버 장애 때 로그에 "Telethon 업데이트 공백 감지"·"[공백 복구]" 줄이 찍히는지, 복구 메시지가
+  중복 발송되지 않는지 확인.

@@ -39,6 +39,7 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
   `<!-- mirror:skip -->`를 붙이면 그 항목 전체가 빠진다. 표시는 백틱 없이 쓴다(백틱 안은 설명으로 보고 빼지 않는다).
 - 미러 제외 파일: `SYNC.md`(운영 맥락).
 - `mirror-push.sh`는 커밋된 HEAD만 내보낸다. `.env.example`은 미러에만 있으므로 `mirror-push.sh` 뒤에 미러 저장소에서 직접 커밋한다.
+- 미러 저장소에서 직접 커밋할 때도 작성자는 `mirror-push.sh`와 같은 이름으로 한다(미러 clone의 `user.name` 확인).
 
 ## 변경 후 배포
 
