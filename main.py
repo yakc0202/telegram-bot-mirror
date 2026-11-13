@@ -985,7 +985,7 @@ def _strip_trailing_url_punctuation(url: str) -> str:
 
 def _is_generic_telegram_channel_link(url: str) -> bool:
     """'t.me/채널명'처럼 특정 게시물이 아니라 채널 자체를 가리키는 링크인지 확인.
-    많은 채널이 매 게시물 끝에 자기 채널 홍보 링크(예: 't.me/<SOURCE_CHATS>')를 서명처럼
+    많은 채널이 매 게시물 끝에 자기 채널 홍보 링크(예: 't.me/<비공개>')를 서명처럼
     붙이는데, 이건 그 채널의 '모든' 게시물에 똑같이 등장해서 그대로 두면 완전히 다른 두
     게시물이 '같은 URL을 공유한다'고 오인되는 원인이 됨. 반면 't.me/채널명/12345'처럼
     메시지 ID까지 포함된 링크는 특정 게시물을 정확히 가리키므로 제외하지 않음."""
@@ -998,6 +998,54 @@ def _is_site_root_link(url: str) -> bool:
     '같은 URL을 공유한다'고 오인되어 양식 유사도만으로 중복 처리됨. 특정 기사·게시물을
     가리키지 않으므로 같은 내용의 근거로 쓰지 않음."""
     return "/" not in url
+
+
+def _telegram_channel_of(url: str) -> Optional[str]:
+    """'t.me/채널명/12345' 또는 'https://t.me/채널명/12345'에서 채널명(소문자)을 반환. 텔레그램
+    공개 채널 링크가 아니면 None('t.me/c/…' 비공개 링크도 채널명을 알 수 없어 None)."""
+    m = re.match(r"(?:https?://)?t\.me/([A-Za-z0-9_]+)/", url)
+    if not m or m.group(1).lower() == "c":
+        return None
+    return m.group(1).lower()
+
+
+def _is_own_channel_link(url: str, source_link_a: str, source_link_b: str) -> bool:
+    """두 메시지가 같은 채널에서 왔고 공유 URL도 그 채널의 게시물이면 True.
+    채널이 매 게시물 끝 서명에 자기 채널의 고정 게시물 링크(예: 't.me/채널명/19912')를
+    붙이면, 내용이 전혀 다른 같은 채널의 글끼리 '같은 URL을 공유한다'고 오인됨. 채널 자체 링크
+    ('t.me/채널명')는 extract_urls에서 이미 빼지만 게시물 ID가 붙은 서명 링크는 거기서 못 거름."""
+    channel = _telegram_channel_of(url)
+    return (
+        channel is not None
+        and _telegram_channel_of(source_link_a or "") == channel
+        and _telegram_channel_of(source_link_b or "") == channel
+    )
+
+
+def _strip_shared_channel_signature(
+    text_a: str, source_link_a: Optional[str], text_b: str, source_link_b: Optional[str]
+) -> Optional[tuple]:
+    """같은 채널의 두 글이 끝부분에 똑같은 줄들(서명)을 갖고 있고 그 안에 그 채널의 게시물 링크가
+    있으면, 그 공통 끝부분을 뺀 (본문 a, 본문 b)를 반환. 해당 없으면 None.
+    매 게시물에 같은 채널 소개·면책 문구를 붙이는 채널은 내용이 전혀 달라도 그 문구 때문에 키워드
+    유사도가 0.5~0.6까지 올라가 자동 중복 기준(THRESHOLD_HIGH)에 닿을 수 있음."""
+    channel = _telegram_channel_of(source_link_a or "")
+    if channel is None or _telegram_channel_of(source_link_b or "") != channel:
+        return None
+    lines_a = text_a.rstrip().splitlines()
+    lines_b = text_b.rstrip().splitlines()
+    common = 0
+    while (
+        common < min(len(lines_a), len(lines_b))
+        and lines_a[-1 - common].strip() == lines_b[-1 - common].strip()
+    ):
+        common += 1
+    if common == 0 or common >= min(len(lines_a), len(lines_b)):
+        return None  # 공통 끝부분이 없거나, 한쪽 글 전체가 공통이면(사실상 같은 글) 그대로 비교
+    suffix = lines_a[len(lines_a) - common:]
+    if not any(_telegram_channel_of(u) == channel for line in suffix for u in URL_RE.findall(line)):
+        return None  # 채널 링크가 없는 공통 끝 문장은 서명이라고 단정할 수 없음
+    return "\n".join(lines_a[: len(lines_a) - common]), "\n".join(lines_b[: len(lines_b) - common])
 
 
 def extract_urls(original_text: str) -> set:
@@ -2724,6 +2772,7 @@ def is_duplicate(text: str, source_label: str = "", source_link: str = "") -> Op
     # (URL은 같아도 문구가 완전히 다르면 "같은 기사에 다른 의견"일 수 있어 LLM으로 재확인)
     url_match_best_score = -1.0
     url_match_best_entry = None
+    url_match_best_shared: set = set()
 
     # 예전엔 "가장 점수 높은 후보 딱 1개"만 추적했는데, 우연히 무관한 메시지가 점수가 더 높으면
     # 진짜 같은 내용인 후보가 밀려나서 LLM한테 확인받을 기회조차 없이 새 정보로 등록되는 문제가
@@ -2830,19 +2879,30 @@ def is_duplicate(text: str, source_label: str = "", source_link: str = "") -> Op
             # 다르면 완전히 다른 리포트이므로 제외
             continue
         score = similarity_score(kw, num, entry["keywords"], entry["numbers"])
+        stripped = _strip_shared_channel_signature(text, source_link, entry["text"], entry.get("source_link"))
+        if stripped:
+            # 같은 채널의 고정 서명(채널 소개·면책 문구)이 유사도를 부풀리지 않게, 서명을 뺀 본문끼리 다시 계산
+            kw_a, num_a = extract_signature(normalize(stripped[0]))
+            kw_b, num_b = extract_signature(normalize(stripped[1]))
+            score = similarity_score(kw_a, num_a, kw_b, num_b)
         if score >= THRESHOLD_LOW:
             candidates.append((score, entry))
         if score > best_score:
             best_score = score
             best_match_entry = entry
-        if urls and entry.get("urls") and (urls & entry["urls"]) and score > url_match_best_score:
+        shared_urls = {
+            u for u in urls & (entry.get("urls") or set())
+            if not _is_own_channel_link(u, source_link, entry.get("source_link", ""))
+        }
+        if shared_urls and score > url_match_best_score:
             url_match_best_score = score
             url_match_best_entry = entry
+            url_match_best_shared = shared_urls
     candidates.sort(key=lambda x: x[0], reverse=True)
 
     if url_match_best_entry is not None:
         matched_preview = make_title_preview(url_match_best_entry["text"], 40)
-        shared_urls = urls & url_match_best_entry.get("urls", set())
+        shared_urls = url_match_best_shared
         if url_match_best_score >= URL_MATCH_SCORE_THRESHOLD:
             log.info(
                 f"동일 URL 공유({sorted(shared_urls)}) + 문구도 유사({url_match_best_score:.2f}) "
