@@ -1,0 +1,71 @@
+# 텔레그램 주식 정보 요약 봇의 로컬 관측성 스택. 포트는 모두 127.0.0.1에만 엶.
+# 실행은 ./up.sh (Alertmanager 설정을 .env에서 만들어 저장소 밖에 둔 뒤 compose up)
+name: telegram-bot-observability
+
+services:
+  tempo-init:
+    image: &tempo_image grafana/tempo:2.8.1
+    user: root
+    entrypoint: ["chown", "-R", "10001:10001", "/var/tempo"]
+    volumes:
+      - tempo-data:/var/tempo
+
+  tempo:
+    image: *tempo_image
+    command: ["-config.file=/etc/tempo.yaml"]
+    depends_on:
+      tempo-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "127.0.0.1:4318:4318"   # OTLP HTTP (봇이 trace를 보내는 곳)
+      - "127.0.0.1:3200:3200"   # Tempo API
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=90d
+      - --web.enable-remote-write-receiver
+      - --enable-feature=exemplar-storage
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./slo-rules.yml:/etc/prometheus/slo-rules.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
+    volumes:
+      # 채팅방 ID·봇 토큰이 들어가므로 저장소 밖(up.sh가 만듦)에서 읽음
+      - ${OBS_SECRETS_DIR:-${HOME}/.config/telegram-bot/observability}:/etc/alertmanager:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+
+volumes:
+  tempo-data:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:

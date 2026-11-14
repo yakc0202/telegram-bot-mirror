@@ -173,6 +173,16 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
 - Telethon이 업데이트 따라잡기를 FloodWait로 포기하면 `_gap_recovery_loop`가 그 구간을 `processed_message_ids` 기준으로 다시 훑는다.
 - 튜닝: `FLOOD_SLEEP_THRESHOLD`(60, Telethon 자동 대기 한도), `FLOOD_WAIT_MAX_SECONDS`(900), `UPDATE_GAP_RECOVERY_DELAY`(600).
 
+### 관측성 (트레이싱·SLO)
+
+- `observability/`: 로컬 Tempo·Prometheus·Alertmanager·Grafana(colima Docker, 포트는 127.0.0.1만). 실행 `observability/up.sh`, Grafana `http://127.0.0.1:3000`.
+- 봇은 `.env`에 `OTEL_EXPORTER_OTLP_ENDPOINT`가 있을 때만 trace를 보낸다(없으면 no-op).
+- span: `message.process`(루트, `bot.mode` live/catchup, `bot.outcome`) → `stage.*`(`bot.lock_wait_ms`)·`stage.send` → `llm.call`(논리 호출 1번, SLO 기준) → `gemini.request`(키 번호·시도 순서·HTTP 상태).
+- span에 메시지 본문·키 값·채팅방 ID를 넣지 않는다.
+- span 이름·속성을 바꾸면 `slo-rules.yml`, `tempo.yaml`의 `dimensions`, 대시보드 JSON도 같이 고친다.
+- Alertmanager 설정은 `up.sh`가 `.env`로 저장소 밖(`~/.config/telegram-bot/observability/`)에 만든다. 틀(`alertmanager.yml.tmpl`)에 보안 값을 쓰지 않는다.
+- 시험 trace는 `OTEL_SERVICE_NAME`을 `telegram-bot`이 아닌 이름으로 보내 SLO에 섞이지 않게 한다.
+
 ### SQLite
 
 - `text_factory`는 `errors="replace"`.

@@ -970,3 +970,23 @@
 - 후속 "내가 매번 읽을 수 없는데 그냥 선제 조치하면?": 남겨 둔 위험(서명 문구로 키워드 유사도 0.49~0.60, 길이가 비슷하면 `THRESHOLD_HIGH` 0.6 자동 중복 가능)도 바로 처리. 사용자의 뜻은 서명 제외를 미루지 말라는 것이었는데, 에이전트가 push 확인 생략으로 잘못 해석해 묻지 않고 push·배포·미러 반영함(사용자 정정 "push를 묻지 말라는 게 아님"). push 전 확인 규칙은 그대로.
   - 수정(`main.py`): `_strip_shared_channel_signature()` 추가. 같은 채널의 두 글 끝에 똑같은 줄들이 있고 그 안에 그 채널 게시물 링크가 있으면, 그 공통 끝부분을 뺀 본문끼리 유사도를 다시 계산. 한쪽 글 전체가 공통이면(사실상 같은 글) 그대로 비교.
   - 시험: 3쌍 유사도 0.52·0.60·0.49 → 0.26 이하(2쌍은 LLM 확인도 안 감). 같은 채널이 같은 소식을 서명과 함께 다시 올린 경우는 0.90으로 계속 중복. DB의 최근 246건(새 정보·중복 기록)을 수정 전·후 코드로 다시 흘림(LLM은 항상 "다른 정보"로 대체): 판정이 바뀐 건 이 채널 서명 오판 4건(중복 → 새 정보)뿐, LLM 확인은 249 → 264회.
+
+### 2026-11-14 로그의 Gemini 키 번호가 어떤 키인지 알 수 있게
+- 상태: 진행중(커밋, push 확인 대기)
+- 배경: 다른 세션 제안(트레이싱과 SLO로 SRE 공고의 트레이싱 근거 채우기)을 사용자와 검토. 사용자가 로컬 Tempo 쪽을 택했고, 순서는 ① 키 번호 고정 ② 로컬 Docker로 OTel 계측과 Tempo ③ SLO와 burn rate 알람. 이 항목은 ①.
+- 원인: `_call_gemini()` 로그의 `키 #N`은 라운드로빈으로 돌린 목록에서의 시도 순서라 호출마다 다른 키를 가리킴. 키별 429 패턴이나 키끼리 한도를 공유하는지 로그로 볼 수 없었음.
+- 수정(`main.py`): `_gemini_key_no()` 추가, `.env` `GEMINI_API_KEYS` 순서(1부터)를 키 번호로 씀. 건너뜀, 실패, 전환 성공, 대기 후 재시도 로그 모두 이 번호로 찍고, 전환 성공 줄에는 몇 번째 시도였는지 따로 적음. 키 값은 남기지 않음.
+- 시험: 가짜 키 3개와 HTTP 응답 대체로 `_call_gemini()` 실행. 시작 키가 바뀌어도 429를 내는 키는 늘 `키 #2`로 찍힘, 전부 429면 기존대로 실패 처리.
+- 알아둘 점: `.env` 키 순서를 바꾸면 번호도 바뀜. 번호와 AI Studio 프로젝트의 대응은 코드로 알 수 없어 사용자가 저장소 밖에 메모해야 함. 배포 후 로그에서 1번 키 429 직후 다른 키도 바로 429인지 보면 키끼리 한도 공유 여부를 판단할 수 있음.
+- 후속 "메모하지 않아도 알 방법": Google API Keys `LookupKey`(`gcloud services api-keys lookup KEY`)에 키 문자열을 넣으면 그 키의 소유 프로젝트 번호(`projects/<번호>/locations/global/keys/<id>`)가 나옴. 스크립트로 `.env` 키를 한 번 조회해 키 번호→프로젝트 번호만 저장소 밖 파일에 저장하고 봇 로그·trace에 같이 찍는 방안을 제안. 이 맥에 `gcloud` 없음, 사용자 로그인 필요.
+  - 사용자 결정 "일단 이거 놔두고 기록만 해둬": 보류. 하려면 `brew install --cask google-cloud-sdk` → 사용자가 `gcloud auth login` → 조회 스크립트 → 봇이 그 파일을 읽어 로그에 프로젝트 번호 표시.
+
+### 2026-11-15 트레이싱과 SLO 붙이기(로컬)
+- 상태: 진행중(커밋, push 확인 대기. push 전까지 봇은 trace를 안 보냄)
+- 요청: "아까 그거 나머지 단계 진행하자" — ② 로컬 OTel 계측과 Tempo ③ SLO와 burn rate 알람.
+- 바뀐 것(`main.py`): `OTEL_EXPORTER_OTLP_ENDPOINT`가 있을 때만 OTLP HTTP로 trace 내보내기(없으면 no-op, `opentelemetry` 로거는 CRITICAL로 낮춰 수집기가 꺼져도 경고 채팅방에 안 쌓임). span 구조는 `message.process`(루트: `bot.mode` live/catchup, `bot.outcome` ignored/chitchat/duplicate/forwarded, `bot.message_age_s`) → `stage.classify`·`stage.dedup`·`stage.summarize`·`stage.classify_image`(공유 락 대기 `bot.lock_wait_ms`)·`stage.send`(`bot.sent`) → `llm.call`(논리 호출 1번, 전부 실패면 ERROR) → `gemini.request`(모델, 키 번호, 시도 순서, HTTP 상태). 키 건너뜀·전체 키 대기·속도 제한 대기는 span 이벤트. Gemini 요청 코드 중복을 `_gemini_request()`로 합침. `requirements.txt`에 `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` 추가(배포 때 pip 설치).
+- 바뀐 것(`observability/`): colima Docker로 띄우는 Tempo 2.8.1(trace 30일, span-metrics → Prometheus), Prometheus 3.5.0(90일), Alertmanager 0.28.1(→ `LOG_CHAT_WARNING`), Grafana 12.1.0(대시보드 "텔레그램 봇 SLO와 trace"). 포트는 127.0.0.1만. `up.sh`가 `.env`의 `LOG_BOT_TOKEN`·`LOG_CHAT_WARNING`으로 Alertmanager 설정을 저장소 밖(`~/.config/telegram-bot/observability/`)에 만듦.
+- SLO(`slo-rules.yml`, 초기값): LLM 호출 성공률 95%, 실시간 메시지 처리 60초 이내 95%, 둘 다 30일. 알람은 다중 창 burn rate(1h·5m 14.4배, 6h·30m 6배 = page, 3d·6h 1배 = ticket). trace가 3시간 없으면 `BotTracesMissing`, Tempo 10분 무응답이면 `TempoDown`.
+- 설치: `brew install colima docker docker-compose`, `~/.docker/config.json`에 compose 플러그인 경로, `colima start --cpu 2 --memory 3 --disk 30`. `.env`에 `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318` 추가(봇 재시작 후 적용).
+- 시험: 가짜 키로 `call_llm()`을 돌려 span 트리 확인(성공 1·전부 429 1). 꺼진 수집기로 보내도 로그 없음. 실제 스택에 서비스 이름 `telegram-bot-test`로 보내 Tempo 검색, span-metrics(키 번호·HTTP 상태 라벨)까지 확인. 규칙 20개 모두 health ok, Alertmanager 설정 로드 확인. `message.process`·`stage.*`는 `main()` 안이라 배포 후 실제 메시지로 확인해야 함.
+- 알아둘 점: `BotTracesMissing`은 배포 전이라 Alertmanager에서 48시간 침묵(id 342298fc). 배포 후 해제. SLO 목표 95%는 계측 전 로그(평소 전체 실패 2~3%, 429 많은 날 12~20%) 기준 초기값이라 실제 데이터로 조정 필요. colima는 로그인 때 자동 시작 설정 안 함(맥 재시작 후 `colima start` → `observability/up.sh`). 알람의 텔레그램 실제 전송은 아직 시험 안 함.

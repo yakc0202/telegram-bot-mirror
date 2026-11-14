@@ -25,6 +25,8 @@ import base64
 import sqlite3
 import hashlib
 import asyncio
+import contextlib
+import functools
 import logging
 import tempfile
 import shutil
@@ -403,6 +405,35 @@ class _RedactSecretsFilter(logging.Filter):
 _redact_filter = _RedactSecretsFilter()
 for _handler in logging.getLogger().handlers:
     _handler.addFilter(_redact_filter)
+
+# ── 트레이싱(OpenTelemetry) ──
+# OTEL_EXPORTER_OTLP_ENDPOINT(예: http://127.0.0.1:4318)가 있을 때만 trace를 내보냄. 없으면 API 기본 no-op이라
+# 수집기(observability/) 없이 배포해도 동작이 같음. span에는 메시지 본문·키 값을 넣지 않음.
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    _trace_provider = TracerProvider(resource=Resource.create({"service.name": os.environ.get("OTEL_SERVICE_NAME", "telegram-bot")}))
+    _trace_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+    trace.set_tracer_provider(_trace_provider)
+    # 수집기가 꺼져 있을 때 내보내기 실패 로그가 경고 채팅방에 쌓이지 않게 함(수집기 상태는 Prometheus up으로 봄)
+    logging.getLogger("opentelemetry").setLevel(logging.CRITICAL)
+tracer = trace.get_tracer("telegram-bot")
+
+
+def _traced_send(fn):
+    """요약 채널 전송 함수를 span(stage.send)으로 감쌈. 메시지 ID를 받으면 bot.sent=True(실패분은 재전송 큐로 감)."""
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        with tracer.start_as_current_span("stage.send") as span:
+            span.set_attribute("bot.send_kind", fn.__name__)
+            result = await fn(*args, **kwargs)
+            span.set_attribute("bot.sent", bool(result))
+            return result
+    return wrapper
 
 # 잡담/주식과 무관한 메시지를 걸러낼지 여부 (기본 켜짐)
 CHITCHAT_FILTER_ENABLED = os.environ.get("CHITCHAT_FILTER_ENABLED", "true").strip().lower() in ("1", "true", "yes")
@@ -1451,6 +1482,12 @@ def _gemini_key_wait_seconds(key: str) -> float:
     return 60 - (now - recent[0]) + 0.1
 
 
+def _gemini_key_no(key: str) -> int:
+    """로그·trace에 남길 키 번호. 라운드로빈 시도 순서가 아니라 `.env` `GEMINI_API_KEYS`에 적힌 순서(1부터)라서
+    같은 번호는 늘 같은 키를 가리킴(키 값은 남기지 않음)."""
+    return GEMINI_API_KEYS.index(key) + 1
+
+
 def _mark_gemini_key_used(key: str):
     _gemini_key_recent_calls.setdefault(key, []).append(time.time())
 
@@ -1490,6 +1527,27 @@ def _gemini_error_detail(e: Exception) -> str:
     return " [" + ", ".join(parts) + "]"
 
 
+def _gemini_request(key: str, prompt: str, max_tokens: int, attempt: int) -> str:
+    """키 하나로 실제 요청 1번. span에는 키 번호·시도 순서·HTTP 상태만 남김(키 값·프롬프트는 안 남김)."""
+    with tracer.start_as_current_span("gemini.request") as span:
+        span.set_attributes({"gen_ai.request.model": GEMINI_MODEL, "gemini.key_no": _gemini_key_no(key),
+                             "gemini.attempt": attempt})
+        _throttle_llm_calls()
+        _mark_gemini_key_used(key)
+        resp = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+            headers={"x-goog-api-key": key},  # URL 쿼리에 넣으면 오류·재시도 로그에 키가 남음
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"maxOutputTokens": max_tokens},
+            },
+            timeout=30,
+        )
+        span.set_attribute("http.response.status_code", resp.status_code)
+        resp.raise_for_status()
+        return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+
 def _call_gemini(prompt: str, max_tokens: int) -> str:
     keys = _gemini_keys_rotated()
     if not keys:
@@ -1503,29 +1561,19 @@ def _call_gemini(prompt: str, max_tokens: int) -> str:
         wait = _gemini_key_wait_seconds(key)
         if wait > 0:
             on_cooldown.append((key, wait))
-            log.info(f"Gemini 키 #{idx+1}는 아직 분당 한도가 안 풀려서 건너뜀 (약 {wait:.1f}초 남음)")
+            log.info(f"Gemini 키 #{_gemini_key_no(key)}는 아직 분당 한도가 안 풀려서 건너뜀 (약 {wait:.1f}초 남음)")
+            trace.get_current_span().add_event("key_skipped", {"gemini.key_no": _gemini_key_no(key), "wait_s": round(wait, 1)})
             continue
         try:
-            _throttle_llm_calls()
-            _mark_gemini_key_used(key)
-            resp = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
-                headers={"x-goog-api-key": key},  # URL 쿼리에 넣으면 오류·재시도 로그에 키가 남음
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"maxOutputTokens": max_tokens},
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
+            result = _gemini_request(key, prompt, max_tokens, attempt=idx + 1)
             if idx > 0:
-                log.info(f"Gemini 키 {idx+1}번째로 전환해서 호출 성공")
-            return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                log.info(f"Gemini 키 #{_gemini_key_no(key)}로 전환해서 호출 성공 ({idx+1}번째 시도)")
+            return result
         except Exception as e:
             last_error = e
             if _is_gemini_rate_limited(e):
                 _mark_gemini_key_exhausted(key)
-            log.info(f"Gemini 키 #{idx+1} 호출 실패, 다음 키 시도: {e}{_gemini_error_detail(e)}")
+            log.info(f"Gemini 키 #{_gemini_key_no(key)} 호출 실패, 다음 키 시도: {e}{_gemini_error_detail(e)}")
             continue
 
     # 모든 키가 당장은 여유가 없는 상태 → 가장 빨리 회복되는 키 하나만 골라서, 그만큼만
@@ -1538,6 +1586,7 @@ def _call_gemini(prompt: str, max_tokens: int) -> str:
     # 빠르게 넘어가도록 함.
     if on_cooldown:
         soonest_key, soonest_wait = min(on_cooldown, key=lambda x: x[1])
+        trace.get_current_span().add_event("all_keys_cooling", {"soonest_wait_s": round(soonest_wait, 1)})
         if soonest_wait > GEMINI_MAX_COOLDOWN_WAIT:
             log.info(
                 f"Gemini 키 전부 분당 한도 도달, 가장 빨리 회복되는 키까지 {soonest_wait:.1f}초"
@@ -1547,28 +1596,17 @@ def _call_gemini(prompt: str, max_tokens: int) -> str:
                 f"Gemini 키 전부 분당 한도 도달 (가장 빨리 회복되는 키까지 {soonest_wait:.1f}초, "
                 f"상한 {GEMINI_MAX_COOLDOWN_WAIT}초 초과)"
             )
-        log.info(f"Gemini 키 전부 분당 한도 도달 → 가장 빨리 회복되는 키까지 {soonest_wait:.1f}초 대기")
+        log.info(f"Gemini 키 전부 분당 한도 도달 → 가장 빨리 회복되는 키 #{_gemini_key_no(soonest_key)}까지 {soonest_wait:.1f}초 대기")
         time.sleep(soonest_wait)
         try:
-            _throttle_llm_calls()
-            _mark_gemini_key_used(soonest_key)
-            resp = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
-                headers={"x-goog-api-key": soonest_key},  # URL 쿼리에 넣으면 오류·재시도 로그에 키가 남음
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"maxOutputTokens": max_tokens},
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
-            log.info("대기 후 재시도 성공")
-            return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            result = _gemini_request(soonest_key, prompt, max_tokens, attempt=len(keys) + 1)
+            log.info(f"대기 후 키 #{_gemini_key_no(soonest_key)} 재시도 성공")
+            return result
         except Exception as e:
             last_error = e
             if _is_gemini_rate_limited(e):
                 _mark_gemini_key_exhausted(soonest_key)
-            log.info(f"대기 후 재시도도 실패: {e}{_gemini_error_detail(e)}")
+            log.info(f"대기 후 키 #{_gemini_key_no(soonest_key)} 재시도도 실패: {e}{_gemini_error_detail(e)}")
 
     raise last_error
 
@@ -1614,6 +1652,7 @@ def _throttle_llm_calls():
         wait_time = LLM_RATE_WINDOW_SECONDS - (now - _llm_call_timestamps[0]) + 0.1
         if wait_time > 0:
             log.info(f"LLM 호출 속도 제한 → {wait_time:.1f}초 대기 후 호출")
+            trace.get_current_span().add_event("throttle_wait", {"wait_s": round(wait_time, 1)})
             time.sleep(wait_time)
 
 
@@ -1626,20 +1665,26 @@ def call_llm(prompt: str, max_tokens: int) -> Optional[str]:
 
     providers_to_try = [LLM_PROVIDER] + [p for p in LLM_FALLBACK_PROVIDERS if p != LLM_PROVIDER]
 
-    for i, provider in enumerate(providers_to_try):
-        try:
-            result = _dispatch_llm_call(provider, prompt, max_tokens)
-            if i > 0:
-                log.info(f"폴백 provider '{provider}'로 호출 성공")
-            return result
-        except Exception as e:
-            # 마지막 provider가 아니면 아직 다른 폴백이 남아있는 정상적인 흐름이라 info로만 기록.
-            # 전부 소진됐을 때만 아래에서 error로 남김.
-            log.info(f"LLM 호출 실패 (provider={provider}), 다음으로 재시도: {e}")
-            continue
+    # 논리적 호출 1번 = span 1개. SLO의 'LLM 호출 성공률'은 이 span의 오류 비율로 셈.
+    with tracer.start_as_current_span("llm.call") as span:
+        span.set_attribute("llm.max_tokens", max_tokens)
+        for i, provider in enumerate(providers_to_try):
+            try:
+                result = _dispatch_llm_call(provider, prompt, max_tokens)
+                if i > 0:
+                    log.info(f"폴백 provider '{provider}'로 호출 성공")
+                span.set_attribute("llm.provider", provider)
+                return result
+            except Exception as e:
+                # 마지막 provider가 아니면 아직 다른 폴백이 남아있는 정상적인 흐름이라 info로만 기록.
+                # 전부 소진됐을 때만 아래에서 error로 남김.
+                log.info(f"LLM 호출 실패 (provider={provider}), 다음으로 재시도: {e}")
+                span.add_event("provider_failed", {"llm.provider": provider, "error.type": type(e).__name__})
+                continue
 
-    log.error(f"모든 LLM provider 호출 실패 (시도 순서: {providers_to_try})")
-    return None
+        log.error(f"모든 LLM provider 호출 실패 (시도 순서: {providers_to_try})")
+        span.set_status(Status(StatusCode.ERROR, "all providers failed"))
+        return None
 
 
 # claude -p의 기본 시스템 프롬프트(코딩 도우미)를 대신함 — 문체·분량이 코딩 답변처럼 바뀌지 않게
@@ -2975,6 +3020,7 @@ def is_duplicate(text: str, source_label: str = "", source_link: str = "") -> Op
     return None
 
 
+@_traced_send
 async def send_media_to_summary_chat(
     client, message, caption: str, summary_entity=None, source_label: str = "출처 미상"
 ) -> Optional[int]:
@@ -3062,6 +3108,7 @@ async def send_media_to_summary_chat(
             return None
 
 
+@_traced_send
 async def send_album_to_summary_chat(
     client, album_events: list, caption: str, summary_entity=None, source_label: str = "출처 미상"
 ) -> Optional[int]:
@@ -3594,6 +3641,16 @@ async def main():
     # 이벤트 수신/재연결 등은 계속 정상 처리됨)
     llm_processing_lock = asyncio.Lock()
 
+    @contextlib.asynccontextmanager
+    async def _llm_stage(stage: str):
+        """메시지 처리 단계(잡담 판단·중복 판단·요약)를 span으로 감싸고, 그 단계가 공유 락을 얼마나
+        기다렸는지 남김. 외부 모델이 느려질 때 뒤 메시지가 락 대기로 밀리는 걸 trace에서 보기 위함."""
+        with tracer.start_as_current_span(f"stage.{stage}") as span:
+            t0 = time.monotonic()
+            async with llm_processing_lock:
+                span.set_attribute("bot.lock_wait_ms", int((time.monotonic() - t0) * 1000))
+                yield span
+
     ALBUM_WAIT_SECONDS = 2  # 앨범(여러 장) 메시지가 흩어져 들어오는 걸 이만큼 기다렸다가 한 번에 처리
     pending_albums: dict = {}   # grouped_id -> [event, event, ...]
     album_tasks: dict = {}      # grouped_id -> asyncio.Task (디바운스 타이머)
@@ -3605,6 +3662,7 @@ async def main():
     # 쌓이는 문제가 있었음(실제로 겪은 사례).
     pending_read_acks: dict = {}   # chat_id -> (chat_entity, 그 채널에서 본 가장 큰 메시지 id)
 
+    @_traced_send
     async def send_to_summary_chat(body: str, log_label: str = "") -> Optional[int]:
         try:
             if TELEGRAM_BOT_TOKEN:
@@ -4052,6 +4110,20 @@ async def main():
         return source_entity_by_id.get(event.chat_id) or await event.get_chat()
 
     async def process_event(event, album_events: list = None):
+        """메시지 1건 처리 = trace 1개. 실시간(live)과 재시작 뒤 따라잡기(catchup)를 나눠, 처리 지연 SLO는
+        live만 셈. 결과(bot.outcome)는 본문 처리 중에 덮어씀."""
+        with tracer.start_as_current_span("message.process") as span:
+            span.set_attributes({
+                "bot.mode": "catchup" if isinstance(event, _FetchedMessageEvent) else "live",
+                "bot.album_size": len(album_events) if album_events else 1,
+                "bot.outcome": "ignored",
+            })
+            msg_date = getattr(event.message, "date", None)
+            if msg_date:
+                span.set_attribute("bot.message_age_s", round((datetime.now(timezone.utc) - msg_date).total_seconds(), 1))
+            await _process_event_body(event, album_events)
+
+    async def _process_event_body(event, album_events: list = None):
         # 감시 채널 메시지를 처리 시작하는 즉시 읽음 처리 대상으로 등록 — 요약이 이미
         # 요약 채널로 전달되니 원본 감시 채널에는 안 읽은 메시지가 계속 쌓이지 않도록 함.
         # 세션 자체는 여전히 "오프라인"으로 유지해 다른 기기로의 읽음 동기화는 최소화하되
@@ -4141,6 +4213,7 @@ async def main():
             body = label
             if source_link:
                 body += f"\n🔗 원문 보기: {source_link}"
+            trace.get_current_span().set_attribute("bot.outcome", "chitchat")
             await send_to_summary_chat(body, log_label=text[:40])
 
         # 키워드 규칙으로 판단이 안 된 메시지 중 일반 요약(summarize_message)을 탈 메시지는 잡담
@@ -4153,7 +4226,7 @@ async def main():
                 category = "STOCK"
             else:
                 try:
-                    async with llm_processing_lock:
+                    async with _llm_stage("classify"):
                         category = await asyncio.to_thread(classify_is_stock_related, text, extract_urls(text))
                 except Exception as e:
                     log.error(f"잡담 판단 중 오류, 안전하게 통과시킴: {e}")
@@ -4165,7 +4238,7 @@ async def main():
         matched = None
         if not is_html_source:
             try:
-                async with llm_processing_lock:
+                async with _llm_stage("dedup"):
                     matched = await asyncio.to_thread(
                         is_duplicate, text, source_label=source_label, source_link=source_link or ""
                     )
@@ -4174,6 +4247,7 @@ async def main():
                 matched = None
 
         if matched:
+            trace.get_current_span().set_attribute("bot.outcome", "duplicate")
             # 오탐 대비 안전망: 중복 판정된 원문도 가볍게 남겨둠 (실시간 흐름에는 영향 없음)
             async with llm_processing_lock:
                 await asyncio.to_thread(log_duplicate, text, source_label, source_link or "", matched["text"])
@@ -4203,7 +4277,7 @@ async def main():
             # LLM을 거치면 숫자가 왜곡될 위험이 있어서 원문을 그대로(줄바꿈 유지) 사용함
             notify_text = text.strip()
         elif SUMMARIZE_ENABLED and meaningful_caption:
-            async with llm_processing_lock:
+            async with _llm_stage("summarize"):
                 if is_html_source:
                     notify_text = await asyncio.to_thread(summarize_html_digest, text)
                 elif is_regional_briefing(text):
@@ -4256,11 +4330,12 @@ async def main():
         if has_media and not notify_text and CHITCHAT_FILTER_ENABLED and is_single_photo:
             try:
                 image_bytes = await client.download_media(event.message, file=bytes)
-                async with llm_processing_lock:
+                async with _llm_stage("classify_image"):
                     img_stock_related = await asyncio.to_thread(classify_image_is_stock_related, image_bytes)
                 if img_stock_related is False:
                     log.info("이미지 내용만으로 주식과 무관한 잡담(밈 등)으로 판단")
                     chitchat_body = "💬 잡담"
+                    trace.get_current_span().set_attribute("bot.outcome", "chitchat")
                     if source_link:
                         chitchat_body += f"\n🔗 원문 보기: {source_link}"
                     await send_to_summary_chat(chitchat_body, log_label="(캡션 없는 이미지)")
@@ -4270,6 +4345,7 @@ async def main():
 
         if not notify_text and not has_media:
             return
+        trace.get_current_span().set_attribute("bot.outcome", "forwarded")
 
         if is_html_source:
             channel_line = f"[{source_label}] 📄 {html_filename_stem}" if html_filename_stem else f"[{source_label}] 📄"

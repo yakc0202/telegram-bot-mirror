@@ -1,0 +1,181 @@
+# 텔레그램 주식 정보 요약 봇 SLO (Tempo span-metrics 기반)
+#
+# SLO 1 llm-availability: 논리적 LLM 호출(llm.call span, 키 순환·재시도·폴백 포함) 성공률 95% (30일)
+# SLO 2 live-latency: 실시간 메시지 처리(message.process span, bot.mode=live) 60초 이내 비율 95% (30일)
+# 목표치는 계측 전 로그 기준 초기값이라, 몇 주 데이터를 본 뒤 조정한다.
+#
+# 알람은 Google SRE Workbook의 다중 창(multiwindow, multi-burn-rate) 방식:
+#   page  : 1시간·5분 창 모두 소진 속도 14.4배 이상 (이대로면 30일 예산을 약 2일에 다 씀)
+#   page  : 6시간·30분 창 모두 6배 이상 (약 5일에 다 씀)
+#   ticket: 3일·6시간 창 모두 1배 이상 (이대로면 기간 끝에 예산을 다 씀)
+# 호출이 없으면 비율이 NaN이라 알람이 울리지 않으므로, 트레이스가 끊긴 것은 BotTracesMissing으로 따로 봄.
+
+groups:
+  - name: slo-recording
+    rules:
+      - record: slo:llm_availability:error_ratio_rate5m
+        expr: |
+          (sum(rate(traces_spanmetrics_calls_total{service="telegram-bot",span_name="llm.call",status_code="STATUS_CODE_ERROR"}[5m])) or vector(0))
+          /
+          sum(rate(traces_spanmetrics_calls_total{service="telegram-bot",span_name="llm.call"}[5m]))
+      - record: slo:llm_availability:error_ratio_rate30m
+        expr: |
+          (sum(rate(traces_spanmetrics_calls_total{service="telegram-bot",span_name="llm.call",status_code="STATUS_CODE_ERROR"}[30m])) or vector(0))
+          /
+          sum(rate(traces_spanmetrics_calls_total{service="telegram-bot",span_name="llm.call"}[30m]))
+      - record: slo:llm_availability:error_ratio_rate1h
+        expr: |
+          (sum(rate(traces_spanmetrics_calls_total{service="telegram-bot",span_name="llm.call",status_code="STATUS_CODE_ERROR"}[1h])) or vector(0))
+          /
+          sum(rate(traces_spanmetrics_calls_total{service="telegram-bot",span_name="llm.call"}[1h]))
+      - record: slo:llm_availability:error_ratio_rate6h
+        expr: |
+          (sum(rate(traces_spanmetrics_calls_total{service="telegram-bot",span_name="llm.call",status_code="STATUS_CODE_ERROR"}[6h])) or vector(0))
+          /
+          sum(rate(traces_spanmetrics_calls_total{service="telegram-bot",span_name="llm.call"}[6h]))
+      - record: slo:llm_availability:error_ratio_rate1d
+        expr: |
+          (sum(rate(traces_spanmetrics_calls_total{service="telegram-bot",span_name="llm.call",status_code="STATUS_CODE_ERROR"}[1d])) or vector(0))
+          /
+          sum(rate(traces_spanmetrics_calls_total{service="telegram-bot",span_name="llm.call"}[1d]))
+      - record: slo:llm_availability:error_ratio_rate3d
+        expr: |
+          (sum(rate(traces_spanmetrics_calls_total{service="telegram-bot",span_name="llm.call",status_code="STATUS_CODE_ERROR"}[3d])) or vector(0))
+          /
+          sum(rate(traces_spanmetrics_calls_total{service="telegram-bot",span_name="llm.call"}[3d]))
+      - record: slo:live_latency:error_ratio_rate5m
+        expr: |
+          1 - (
+            sum(rate(traces_spanmetrics_latency_bucket{service="telegram-bot",span_name="message.process",bot_mode="live",le=~"60(\\.0)?"}[5m]))
+            /
+            sum(rate(traces_spanmetrics_latency_count{service="telegram-bot",span_name="message.process",bot_mode="live"}[5m]))
+          )
+      - record: slo:live_latency:error_ratio_rate30m
+        expr: |
+          1 - (
+            sum(rate(traces_spanmetrics_latency_bucket{service="telegram-bot",span_name="message.process",bot_mode="live",le=~"60(\\.0)?"}[30m]))
+            /
+            sum(rate(traces_spanmetrics_latency_count{service="telegram-bot",span_name="message.process",bot_mode="live"}[30m]))
+          )
+      - record: slo:live_latency:error_ratio_rate1h
+        expr: |
+          1 - (
+            sum(rate(traces_spanmetrics_latency_bucket{service="telegram-bot",span_name="message.process",bot_mode="live",le=~"60(\\.0)?"}[1h]))
+            /
+            sum(rate(traces_spanmetrics_latency_count{service="telegram-bot",span_name="message.process",bot_mode="live"}[1h]))
+          )
+      - record: slo:live_latency:error_ratio_rate6h
+        expr: |
+          1 - (
+            sum(rate(traces_spanmetrics_latency_bucket{service="telegram-bot",span_name="message.process",bot_mode="live",le=~"60(\\.0)?"}[6h]))
+            /
+            sum(rate(traces_spanmetrics_latency_count{service="telegram-bot",span_name="message.process",bot_mode="live"}[6h]))
+          )
+      - record: slo:live_latency:error_ratio_rate1d
+        expr: |
+          1 - (
+            sum(rate(traces_spanmetrics_latency_bucket{service="telegram-bot",span_name="message.process",bot_mode="live",le=~"60(\\.0)?"}[1d]))
+            /
+            sum(rate(traces_spanmetrics_latency_count{service="telegram-bot",span_name="message.process",bot_mode="live"}[1d]))
+          )
+      - record: slo:live_latency:error_ratio_rate3d
+        expr: |
+          1 - (
+            sum(rate(traces_spanmetrics_latency_bucket{service="telegram-bot",span_name="message.process",bot_mode="live",le=~"60(\\.0)?"}[3d]))
+            /
+            sum(rate(traces_spanmetrics_latency_count{service="telegram-bot",span_name="message.process",bot_mode="live"}[3d]))
+          )
+
+  - name: slo-burn-rate-alerts
+    rules:
+      - alert: LlmAvailabilityBurnRate1h
+        expr: |
+          slo:llm_availability:error_ratio_rate1h > (14.4 * 0.05)
+          and
+          slo:llm_availability:error_ratio_rate5m > (14.4 * 0.05)
+        for: 2m
+        labels:
+          severity: page
+          slo: llm-availability
+        annotations:
+          summary: "LLM 호출 성공률 SLO 오류 예산 소진 (1h/5m 창, 14.4배)"
+          description: "2일 안에 30일 오류 예산 소진 속도. 최근 1h 오류 비율 {{ $value | humanizePercentage }} (예산 5%)."
+      - alert: LlmAvailabilityBurnRate6h
+        expr: |
+          slo:llm_availability:error_ratio_rate6h > (6 * 0.05)
+          and
+          slo:llm_availability:error_ratio_rate30m > (6 * 0.05)
+        for: 15m
+        labels:
+          severity: page
+          slo: llm-availability
+        annotations:
+          summary: "LLM 호출 성공률 SLO 오류 예산 소진 (6h/30m 창, 6배)"
+          description: "5일 안에 30일 오류 예산 소진 속도. 최근 6h 오류 비율 {{ $value | humanizePercentage }} (예산 5%)."
+      - alert: LlmAvailabilityBurnRate3d
+        expr: |
+          slo:llm_availability:error_ratio_rate3d > (1 * 0.05)
+          and
+          slo:llm_availability:error_ratio_rate6h > (1 * 0.05)
+        for: 1h
+        labels:
+          severity: ticket
+          slo: llm-availability
+        annotations:
+          summary: "LLM 호출 성공률 SLO 오류 예산 소진 (3d/6h 창, 1배)"
+          description: "기간 끝까지 오류 예산을 다 쓰는 속도. 최근 3d 오류 비율 {{ $value | humanizePercentage }} (예산 5%)."
+      - alert: LiveLatencyBurnRate1h
+        expr: |
+          slo:live_latency:error_ratio_rate1h > (14.4 * 0.05)
+          and
+          slo:live_latency:error_ratio_rate5m > (14.4 * 0.05)
+        for: 2m
+        labels:
+          severity: page
+          slo: live-latency
+        annotations:
+          summary: "실시간 처리 지연(60초) SLO 오류 예산 소진 (1h/5m 창, 14.4배)"
+          description: "2일 안에 30일 오류 예산 소진 속도. 최근 1h 오류 비율 {{ $value | humanizePercentage }} (예산 5%)."
+      - alert: LiveLatencyBurnRate6h
+        expr: |
+          slo:live_latency:error_ratio_rate6h > (6 * 0.05)
+          and
+          slo:live_latency:error_ratio_rate30m > (6 * 0.05)
+        for: 15m
+        labels:
+          severity: page
+          slo: live-latency
+        annotations:
+          summary: "실시간 처리 지연(60초) SLO 오류 예산 소진 (6h/30m 창, 6배)"
+          description: "5일 안에 30일 오류 예산 소진 속도. 최근 6h 오류 비율 {{ $value | humanizePercentage }} (예산 5%)."
+      - alert: LiveLatencyBurnRate3d
+        expr: |
+          slo:live_latency:error_ratio_rate3d > (1 * 0.05)
+          and
+          slo:live_latency:error_ratio_rate6h > (1 * 0.05)
+        for: 1h
+        labels:
+          severity: ticket
+          slo: live-latency
+        annotations:
+          summary: "실시간 처리 지연(60초) SLO 오류 예산 소진 (3d/6h 창, 1배)"
+          description: "기간 끝까지 오류 예산을 다 쓰는 속도. 최근 3d 오류 비율 {{ $value | humanizePercentage }} (예산 5%)."
+
+  - name: pipeline-health
+    rules:
+      - alert: TempoDown
+        expr: up{job="tempo"} == 0
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "Tempo 수집기가 10분 넘게 응답하지 않음"
+          description: "trace와 SLO 지표가 쌓이지 않는 중. observability/에서 docker compose ps로 확인."
+      - alert: BotTracesMissing
+        expr: (sum(increase(traces_spanmetrics_calls_total{service="telegram-bot",span_name="message.process"}[3h])) or vector(0)) == 0
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "3시간 동안 봇 메시지 처리 trace가 없음"
+          description: "봇이 멈췄거나 OTEL_EXPORTER_OTLP_ENDPOINT가 빠졌거나 감시 채널이 조용함. SLO 알람은 호출이 없으면 울리지 않으므로 이걸로 확인."

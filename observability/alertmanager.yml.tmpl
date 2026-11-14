@@ -1,0 +1,21 @@
+# up.sh가 이 틀에 .env의 LOG_CHAT_WARNING을 넣어 저장소 밖(OBS_SECRETS_DIR)에 alertmanager.yml을 만든다.
+# 봇 토큰은 같은 폴더의 bot_token 파일로 읽는다. 이 틀에는 보안 값을 쓰지 않는다.
+route:
+  receiver: telegram-warning
+  group_by: [alertname, slo]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: telegram-warning
+    telegram_configs:
+      - bot_token_file: /etc/alertmanager/bot_token
+        chat_id: __LOG_CHAT_WARNING__
+        parse_mode: HTML
+        send_resolved: true
+        message: |-
+          {{ if eq .Status "firing" }}🚨{{ else }}✅{{ end }} [{{ .CommonLabels.severity }}] {{ .CommonLabels.alertname }}
+          {{ range .Alerts }}{{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ end }}

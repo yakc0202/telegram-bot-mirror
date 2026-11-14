@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: telegram-bot
+    folder: telegram-bot
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards
