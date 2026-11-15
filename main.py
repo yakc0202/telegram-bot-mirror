@@ -424,6 +424,10 @@ if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
 tracer = trace.get_tracer("telegram-bot")
 
 
+# 업로드를 다 보낸 뒤 응답만 시간 초과된 전송. 텔레그램이 이미 올렸을 수 있어 실패로 보고 다시 보내면 중복이 됨
+SEND_UNCONFIRMED = -1
+
+
 def _traced_send(fn):
     """요약 채널 전송 함수를 span(stage.send)으로 감쌈. 메시지 ID를 받으면 bot.sent=True(실패분은 재전송 큐로 감)."""
     @functools.wraps(fn)
@@ -431,7 +435,9 @@ def _traced_send(fn):
         with tracer.start_as_current_span("stage.send") as span:
             span.set_attribute("bot.send_kind", fn.__name__)
             result = await fn(*args, **kwargs)
-            span.set_attribute("bot.sent", bool(result))
+            span.set_attribute("bot.sent", bool(result) and result != SEND_UNCONFIRMED)
+            if result == SEND_UNCONFIRMED:
+                span.set_attribute("bot.send_unconfirmed", True)
             return result
     return wrapper
 
@@ -3092,6 +3098,12 @@ async def send_media_to_summary_chat(
                 f"봇으로 이미지/미디어 전송 실패 [채널: {source_label}, 시각: {now_str}]: "
                 f"{resp.status_code} {resp.text}"
             )
+        except requests.exceptions.ReadTimeout as e:
+            log.warning(
+                f"봇으로 이미지/미디어 전송 응답 시간 초과 [채널: {source_label}, 시각: {now_str}] → "
+                f"텔레그램이 이미 올렸을 수 있어 다시 보내지 않음: {e}"
+            )
+            return SEND_UNCONFIRMED
         except Exception as e:
             log.warning(f"봇으로 이미지/미디어 전송 중 오류 [채널: {source_label}, 시각: {now_str}]: {e}")
         finally:
@@ -3171,6 +3183,12 @@ async def send_album_to_summary_chat(
                 f"봇으로 앨범 전송 실패 [채널: {source_label}, 시각: {now_str}]: "
                 f"{resp.status_code} {resp.text}"
             )
+        except requests.exceptions.ReadTimeout as e:
+            log.warning(
+                f"봇으로 앨범 전송 응답 시간 초과 [채널: {source_label}, 시각: {now_str}] → "
+                f"텔레그램이 이미 올렸을 수 있어 다시 보내지 않음: {e}"
+            )
+            return SEND_UNCONFIRMED
         except Exception as e:
             log.warning(f"봇으로 앨범 전송 중 오류 [채널: {source_label}, 시각: {now_str}]: {e}")
         finally:
@@ -3441,7 +3459,8 @@ def render_digest_html(
 # 재전송 큐까지 안 가고 이 자리에서 바로 몇 번 재시도하면 대부분 즉시 복구됨.
 _telegram_bot_api_session = requests.Session()
 _telegram_bot_api_session.mount("https://", HTTPAdapter(max_retries=Retry(
-    total=3, connect=3, read=2, backoff_factor=0.3,
+    # 연결 실패만 재시도. 응답 시간 초과는 텔레그램이 이미 받았을 수 있어 다시 보내면 중복이 됨
+    total=3, connect=3, read=0, backoff_factor=0.3,
     allowed_methods=frozenset(["POST"]),
 )))
 
@@ -4409,6 +4428,10 @@ async def main():
                     client, event.message, body, summary_entity=summary_entity, source_label=source_label
                 )
                 media_label = "이미지/미디어"
+            if sent_msg_id == SEND_UNCONFIRMED:
+                # 올라갔는지 모르는 전송은 텍스트로 다시 보내거나 재전송 큐에 넣지 않음(중복 방지).
+                # 메시지 ID를 모르니 "이전 요약 보기" 링크도 저장하지 않음.
+                return
             if sent_msg_id:
                 log.info(f"{media_label}(+요약)를 요약 채널에 전송 완료: {text[:40]!r}...")
 
