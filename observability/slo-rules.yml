@@ -172,10 +172,10 @@ groups:
           summary: "Tempo 수집기가 10분 넘게 응답하지 않음"
           description: "trace와 SLO 지표가 쌓이지 않는 중. observability/에서 docker compose ps로 확인."
       - alert: BotTracesMissing
-        expr: (sum(increase(traces_spanmetrics_calls_total{service="telegram-bot",span_name="message.process"}[3h])) or vector(0)) == 0
+        expr: (sum(increase(traces_spanmetrics_calls_total{service="telegram-bot",span_name="message.process"}[8h])) or vector(0)) == 0
         for: 15m
         labels:
           severity: ticket
         annotations:
-          summary: "3시간 동안 봇 메시지 처리 trace가 없음"
-          description: "봇이 멈췄거나 OTEL_EXPORTER_OTLP_ENDPOINT가 빠졌거나 감시 채널이 조용함. SLO 알람은 호출이 없으면 울리지 않으므로 이걸로 확인."
+          summary: "8시간 동안 봇 메시지 처리 trace가 없음"
+          description: "봇이 멈췄거나 OTEL_EXPORTER_OTLP_ENDPOINT가 빠졌음(최근 16일 밤 최대 공백 6.8시간이라 8시간으로 둠). SLO 알람은 호출이 없으면 울리지 않으므로 이걸로 확인."

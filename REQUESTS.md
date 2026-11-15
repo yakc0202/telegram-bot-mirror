@@ -990,3 +990,9 @@
 - 설치: `brew install colima docker docker-compose`, `~/.docker/config.json`에 compose 플러그인 경로, `colima start --cpu 2 --memory 3 --disk 30`. `.env`에 `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318` 추가(봇 재시작 후 적용).
 - 시험: 가짜 키로 `call_llm()`을 돌려 span 트리 확인(성공 1·전부 429 1). 꺼진 수집기로 보내도 로그 없음. 실제 스택에 서비스 이름 `telegram-bot-test`로 보내 Tempo 검색, span-metrics(키 번호·HTTP 상태 라벨)까지 확인. 규칙 20개 모두 health ok, Alertmanager 설정 로드 확인. `message.process`·`stage.*`는 `main()` 안이라 배포 후 실제 메시지로 확인해야 함.
 - 알아둘 점: `BotTracesMissing`은 배포 전이라 Alertmanager에서 48시간 침묵(id 342298fc). 배포 후 해제. SLO 목표 95%는 계측 전 로그(평소 전체 실패 2~3%, 429 많은 날 12~20%) 기준 초기값이라 실제 데이터로 조정 필요. colima는 로그인 때 자동 시작 설정 안 함(맥 재시작 후 `colima start` → `observability/up.sh`). 알람의 텔레그램 실제 전송은 아직 시험 안 함.
+- 후속 "push": 11/15 00:36 배포(Actions 성공), 재시작 후 오류 0, 봇 프로세스에 `OTEL_EXPORTER_OTLP_ENDPOINT` 적용 확인. 미러 반영(9f8e5bb)과 미러 `.env.example`에 수집기 주소 추가(470b841). 재시작 후 4시간 동안 감시 채널 메시지가 없어 실제 trace는 아직 없음.
+  - `BotTracesMissing` 기준을 3시간 → 8시간으로 수정: 10/30~11/15 처리 기록에서 메시지 사이 최대 공백이 밤 6.8시간(11/01), 4시간 넘는 공백도 3번이라 3시간이면 조용한 밤마다 울림. Prometheus 재시작으로 적용, 커밋은 push 확인 대기.
+  - 첫 실제 trace(11/15 07:15, 실시간·이미지 1건): `message.process` 7.8초 → `stage.dedup` 0.09초, `stage.summarize`/`llm.call`/`gemini.request` 1.5초(키 #1, 1번째 시도, 200), `stage.send` 6.3초. 병합 판단 모드라 `stage.classify`는 따로 없음. 전송 6.3초는 로그상 이미지가 다른 DC에 있어 연결(약 2초)과 인증 넘기기(약 4초) 때문. 병목은 LLM이 아니라 미디어 다운로드.
+  - `bot.message_age_s` 44.6초: 게시부터 처리 시작까지 지연. pmset 기록상 맥은 안 잠듦, 원인 미확인. 지연 SLO는 봇 처리 시간(`message.process` 길이)만 재서 이 지연은 빠짐. 정의 변경 여부는 사용자 결정 대기.
+  - 00:36~07:15 메시지 0건: 지난 일요일(11/08)은 같은 시간대에 04:39~05:46 15건이 있었음. 그 사이 경고·FloodWait·공백 복구 로그 없고 07:15 실시간 수신은 정상이라 조용한 밤으로 보지만, 놓친 메시지가 있었는지는 다음 재시작 catch-up에서 확인.
+  - 침묵 342298fc 해제. span-metrics 6종 수집, `slo:*:error_ratio_rate1h` 둘 다 0으로 계산됨, 울린 알람 없음. lg 세션에 배포 완료와 첫 trace 결과 알림.
