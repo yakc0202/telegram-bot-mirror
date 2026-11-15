@@ -3051,7 +3051,8 @@ async def send_media_to_summary_chat(
             styled_caption = f"<blockquote>{html.escape(caption[:1000])}</blockquote>"
             with open(tmp_path, "rb") as f:
                 if has_real_photo(message):
-                    resp = requests.post(
+                    resp = await asyncio.to_thread(
+                        requests.post,
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
                         data={"chat_id": DIGEST_CHAT, "caption": styled_caption, "parse_mode": "HTML"},
                         files={"photo": ("photo.jpg", f)},
@@ -3059,7 +3060,8 @@ async def send_media_to_summary_chat(
                     )
                 else:
                     filename = getattr(getattr(message, "file", None), "name", None) or "file"
-                    resp = requests.post(
+                    resp = await asyncio.to_thread(
+                        requests.post,
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
                         data={"chat_id": DIGEST_CHAT, "caption": styled_caption, "parse_mode": "HTML"},
                         files={"document": (filename, f)},
@@ -3151,7 +3153,9 @@ async def send_album_to_summary_chat(
                     item["parse_mode"] = "HTML"
                 media_json.append(item)
 
-            resp = requests.post(
+            # 업로드는 최대 90초까지 걸릴 수 있어 스레드에서 돌림(이벤트 루프를 막으면 그동안 수신이 멈춤)
+            resp = await asyncio.to_thread(
+                requests.post,
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup",
                 data={"chat_id": DIGEST_CHAT, "media": json.dumps(media_json)},
                 files=files,
@@ -3666,7 +3670,7 @@ async def main():
     async def send_to_summary_chat(body: str, log_label: str = "") -> Optional[int]:
         try:
             if TELEGRAM_BOT_TOKEN:
-                msg_id = send_bot_notification(DIGEST_CHAT, body)
+                msg_id = await asyncio.to_thread(send_bot_notification, DIGEST_CHAT, body)
             else:
                 sent_msg = await client.send_message(summary_entity, body)
                 msg_id = sent_msg.id

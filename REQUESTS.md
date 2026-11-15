@@ -996,3 +996,8 @@
   - `bot.message_age_s` 44.6초: 게시부터 처리 시작까지 지연. pmset 기록상 맥은 안 잠듦, 원인 미확인. 지연 SLO는 봇 처리 시간(`message.process` 길이)만 재서 이 지연은 빠짐. 정의 변경 여부는 사용자 결정 대기.
   - 00:36~07:15 메시지 0건: 지난 일요일(11/08)은 같은 시간대에 04:39~05:46 15건이 있었음. 그 사이 경고·FloodWait·공백 복구 로그 없고 07:15 실시간 수신은 정상이라 조용한 밤으로 보지만, 놓친 메시지가 있었는지는 다음 재시작 catch-up에서 확인.
   - 침묵 342298fc 해제. span-metrics 6종 수집, `slo:*:error_ratio_rate1h` 둘 다 0으로 계산됨, 울린 알람 없음. lg 세션에 배포 완료와 첫 trace 결과 알림.
+- 후속 "그대로 배포"(지연 SLO 정의는 그대로): 14427f7 push, 12:20 배포 성공·오류 0, 미러 7c00020. 재시작 catch-up에서 놓친 메시지 0건 → 00:36~07:15 무메시지는 실제로 조용했던 것.
+  - 배포 후 6시간 trace(52건, forwarded 38·chitchat 12·duplicate 2): LLM 실패 0, 60초 초과 1건(1.9%).
+  - trace로 찾은 문제: 10:16 앨범 2장(미국 주식 인사이더 주간 브리핑) `message.process` 113초 중 `stage.send` 앨범 91.8초 → `sendMediaGroup` read timeout(90초)으로 실패, 텍스트 폴백 17초(역시 read timeout 후 재시도). 4장 앨범도 39.5초. LLM은 각 1~2초.
+  - 원인: `send_album_to_summary_chat`·`send_media_to_summary_chat`·`send_to_summary_chat`이 async 함수 안에서 동기 `requests.post`를 불러 업로드 동안 이벤트 루프 전체(수신·다른 메시지 처리)가 멈춤. → 세 곳 HTTP 호출을 `asyncio.to_thread`로 옮김. 시험: 가짜 2초 업로드 중 0.1초 틱이 19번 돌아감(전에는 0). AGENTS.md 규칙 추가. push 확인 대기.
+  - 남은 위험(안 고침): ① read timeout은 텔레그램이 실제로 받았을 수도 있어 텍스트 폴백이 중복으로 보일 수 있음(10:18 요약 채널에 앨범과 텍스트가 둘 다 왔는지 사용자 확인 필요). ② 앨범 실패는 재전송 큐에 안 들어가 이미지가 빠짐. ③ 전송이 더 이상 줄 세워지지 않아 동시에 처리된 메시지끼리 요약 채널 순서가 바뀔 수 있음.
