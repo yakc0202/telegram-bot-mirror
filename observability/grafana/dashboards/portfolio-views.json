@@ -1,0 +1,287 @@
+{
+  "uid": "portfolio-views",
+  "title": "포트폴리오 조회",
+  "tags": [
+    "portfolio"
+  ],
+  "timezone": "Asia/Seoul",
+  "refresh": "10m",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "schemaVersion": 41,
+  "editable": true,
+  "description": "Cloudflare D1 조회 기록을 10분마다 복사한 로컬 SQLite. 봇과 본인 기기(?me=1)는 뺌.",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "오늘 조회",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "portfolio-views"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "portfolio-views"
+          },
+          "queryText": "SELECT count(*) AS 조회 FROM views WHERE bot = 0 AND status = 200 AND date(ts, '+9 hours') = date('now', '+9 hours')",
+          "rawQueryText": "SELECT count(*) AS 조회 FROM views WHERE bot = 0 AND status = 200 AND date(ts, '+9 hours') = date('now', '+9 hours')",
+          "queryType": "table",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "최근 7일 조회",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "portfolio-views"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "portfolio-views"
+          },
+          "queryText": "SELECT count(*) AS 조회 FROM views WHERE bot = 0 AND status = 200 AND ts >= datetime('now', '-7 days')",
+          "rawQueryText": "SELECT count(*) AS 조회 FROM views WHERE bot = 0 AND status = 200 AND ts >= datetime('now', '-7 days')",
+          "queryType": "table",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "최근 7일 접속 네트워크 수",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "portfolio-views"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "portfolio-views"
+          },
+          "queryText": "SELECT count(DISTINCT org) AS 네트워크 FROM views WHERE bot = 0 AND status = 200 AND ts >= datetime('now', '-7 days')",
+          "rawQueryText": "SELECT count(DISTINCT org) AS 네트워크 FROM views WHERE bot = 0 AND status = 200 AND ts >= datetime('now', '-7 days')",
+          "queryType": "table",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "마지막 조회",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "portfolio-views"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "portfolio-views"
+          },
+          "queryText": "SELECT strftime('%m-%d %H:%M', max(ts), '+9 hours') AS 마지막 FROM views WHERE bot = 0 AND status = 200",
+          "rawQueryText": "SELECT strftime('%m-%d %H:%M', max(ts), '+9 hours') AS 마지막 FROM views WHERE bot = 0 AND status = 200",
+          "queryType": "table",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "사이트별 하루 조회 (KST)",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "portfolio-views"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "portfolio-views"
+          },
+          "queryText": "SELECT CAST(strftime('%s', date(ts, '+9 hours')) AS INTEGER) - 32400 AS time, CASE WHEN length(path) > 38 THEN substr(substr(path, 39), 1, instr(substr(path, 39) || '/', '/') - 1) WHEN path = '/' THEN '(첫 화면)' ELSE path END AS site, count(*) AS value FROM views WHERE bot = 0 AND status = 200 GROUP BY 1, 2 ORDER BY 1",
+          "rawQueryText": "SELECT CAST(strftime('%s', date(ts, '+9 hours')) AS INTEGER) - 32400 AS time, CASE WHEN length(path) > 38 THEN substr(substr(path, 39), 1, instr(substr(path, 39) || '/', '/') - 1) WHEN path = '/' THEN '(첫 화면)' ELSE path END AS site, count(*) AS value FROM views WHERE bot = 0 AND status = 200 GROUP BY 1, 2 ORDER BY 1",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 80,
+            "barAlignment": 0
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "사이트별 합계",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "portfolio-views"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 10,
+        "x": 0,
+        "y": 13
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "portfolio-views"
+          },
+          "queryText": "SELECT CASE WHEN length(path) > 38 THEN substr(substr(path, 39), 1, instr(substr(path, 39) || '/', '/') - 1) WHEN path = '/' THEN '(첫 화면)' ELSE path END AS 사이트, count(*) AS 조회, count(DISTINCT org) AS 네트워크, strftime('%m-%d %H:%M', max(ts), '+9 hours') AS 마지막 FROM views WHERE bot = 0 AND status = 200 GROUP BY 1 ORDER BY 2 DESC",
+          "rawQueryText": "SELECT CASE WHEN length(path) > 38 THEN substr(substr(path, 39), 1, instr(substr(path, 39) || '/', '/') - 1) WHEN path = '/' THEN '(첫 화면)' ELSE path END AS 사이트, count(*) AS 조회, count(DISTINCT org) AS 네트워크, strftime('%m-%d %H:%M', max(ts), '+9 hours') AS 마지막 FROM views WHERE bot = 0 AND status = 200 GROUP BY 1 ORDER BY 2 DESC",
+          "queryType": "table",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "최근 조회 50건",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "portfolio-views"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 14,
+        "x": 10,
+        "y": 13
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "portfolio-views"
+          },
+          "queryText": "SELECT strftime('%m-%d %H:%M', ts, '+9 hours') AS 시각, CASE WHEN length(path) > 38 THEN substr(substr(path, 39), 1, instr(substr(path, 39) || '/', '/') - 1) WHEN path = '/' THEN '(첫 화면)' ELSE path END AS 사이트, country || ' ' || city AS 지역, org AS 네트워크, referrer AS 앞페이지 FROM views WHERE bot = 0 ORDER BY ts DESC LIMIT 50",
+          "rawQueryText": "SELECT strftime('%m-%d %H:%M', ts, '+9 hours') AS 시각, CASE WHEN length(path) > 38 THEN substr(substr(path, 39), 1, instr(substr(path, 39) || '/', '/') - 1) WHEN path = '/' THEN '(첫 화면)' ELSE path END AS 사이트, country || ' ' || city AS 지역, org AS 네트워크, referrer AS 앞페이지 FROM views WHERE bot = 0 ORDER BY ts DESC LIMIT 50",
+          "queryType": "table",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ]
+    }
+  ]
+}

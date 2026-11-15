@@ -171,6 +171,14 @@ groups:
         annotations:
           summary: "Tempo 수집기가 10분 넘게 응답하지 않음"
           description: "trace와 SLO 지표가 쌓이지 않는 중. observability/에서 docker compose ps로 확인."
+      - alert: LogPipelineDown
+        expr: up{job=~"loki|alloy"} == 0
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "로그 수집({{ $labels.job }})이 10분 넘게 응답하지 않음"
+          description: "봇 로그 WARNING 알림이 오지 않는 중. observability/에서 docker compose ps로 확인."
       - alert: BotTracesMissing
         expr: (sum(increase(traces_spanmetrics_calls_total{service="telegram-bot",span_name="message.process"}[8h])) or vector(0)) == 0
         for: 15m

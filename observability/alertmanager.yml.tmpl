@@ -6,6 +6,14 @@ route:
   group_wait: 30s
   group_interval: 5m
   repeat_interval: 4h
+  routes:
+    # 봇 로그 WARNING 이상(Loki 규칙). 5분마다 새로 생긴 줄 종류만 모아 보내고, 해소 알림은 안 보냄
+    - matchers: [alertname="BotLogWarning"]
+      receiver: telegram-log
+      group_by: [alertname]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 24h
 
 receivers:
   - name: telegram-warning
@@ -18,4 +26,15 @@ receivers:
           {{ if eq .Status "firing" }}🚨{{ else }}✅{{ end }} [{{ .CommonLabels.severity }}] {{ .CommonLabels.alertname }}
           {{ range .Alerts }}{{ .Annotations.summary }}
           {{ .Annotations.description }}
+          {{ end }}
+  - name: telegram-log
+    telegram_configs:
+      - bot_token_file: /etc/alertmanager/bot_token
+        chat_id: __LOG_CHAT_WARNING__
+        parse_mode: HTML
+        send_resolved: false
+        disable_notifications: true
+        message: |-
+          📋 봇 로그 경고 {{ len .Alerts.Firing }}종류 (최근 5분)
+          {{ range .Alerts.Firing }}• {{ .Annotations.summary | html }}
           {{ end }}

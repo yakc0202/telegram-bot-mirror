@@ -1,0 +1,35 @@
+// 봇 로그 파일을 Loki로 보낸다. 시각이 없는 줄(Traceback 등)은 앞 줄에 붙이고, 줄 앞 시각을 KST로 읽는다.
+local.file_match "bot" {
+  path_targets = [{"__path__" = "/logs/stderr.log", "job" = "telegram-bot"}]
+}
+
+loki.source.file "bot" {
+  targets    = local.file_match.bot.targets
+  forward_to = [loki.process.bot.receiver]
+}
+
+loki.process "bot" {
+  stage.multiline {
+    firstline     = "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2},\\d{3} "
+    max_wait_time = "3s"
+    max_lines     = 500
+  }
+  stage.regex {
+    expression = "^(?P<ts>\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2},\\d{3}) \\[(?P<level>[A-Z]+)\\]"
+  }
+  stage.timestamp {
+    source   = "ts"
+    format   = "2006-01-02 15:04:05,000"
+    location = "Asia/Seoul"
+  }
+  stage.labels {
+    values = {level = ""}
+  }
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

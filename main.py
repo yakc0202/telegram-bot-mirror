@@ -295,6 +295,8 @@ LOG_BOT_TOKEN = os.environ.get("LOG_BOT_TOKEN")
 _log_chat_info_raw = os.environ.get("LOG_CHAT_INFO", "").strip()
 # LOG_CHAT_WARNING이 없으면 예전 이름인 LOG_CHAT을 그대로 씀 (하위 호환)
 _log_chat_warning_raw = os.environ.get("LOG_CHAT_WARNING", "").strip() or os.environ.get("LOG_CHAT", "").strip()
+# false면 WARNING 이상을 봇이 직접 보내지 않음(로컬 Loki가 로그 파일을 읽어 5분 단위로 묶어 Alertmanager로 보낼 때)
+LOG_SHIP_WARNING = os.environ.get("LOG_SHIP_WARNING", "true").strip().lower() in ("1", "true", "yes")
 
 # 하루 동안(예: 06시~18시) 새로 등록된 정보들을 모아서, 지정한 시각에 종합 정리 + 인사이트를
 # 한 번에 만들어 올리는 기능 (기본 꺼짐, opt-in). 시각은 모두 한국시간(KST) 기준.
@@ -353,7 +355,7 @@ if LOG_BOT_TOKEN and LOG_CHAT_INFO:
     _handler_info.addFilter(_ExactLevelFilter(logging.INFO))  # 딱 INFO만 (WARNING 이상은 안 감)
     logging.getLogger().addHandler(_handler_info)
 
-if LOG_BOT_TOKEN and LOG_CHAT_WARNING:
+if LOG_BOT_TOKEN and LOG_CHAT_WARNING and LOG_SHIP_WARNING:
     _handler_warning = _TelegramQueueLogHandler(lambda: _log_queue_warning)
     _handler_warning.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     _handler_warning.setLevel(logging.WARNING)  # WARNING 이상만
@@ -3596,7 +3598,7 @@ async def main():
         _log_queue_info = asyncio.Queue()
         _spawn(_log_shipper_loop(lambda: _log_queue_info, LOG_BOT_TOKEN, LOG_CHAT_INFO))
         log.info(f"INFO 로그 전송 활성화됨 → LOG_CHAT_INFO={LOG_CHAT_INFO}")
-    if LOG_BOT_TOKEN and LOG_CHAT_WARNING:
+    if LOG_BOT_TOKEN and LOG_CHAT_WARNING and LOG_SHIP_WARNING:
         _log_queue_warning = asyncio.Queue()
         _spawn(_log_shipper_loop(lambda: _log_queue_warning, LOG_BOT_TOKEN, LOG_CHAT_WARNING))
         log.info(f"WARNING+ 로그 전송 활성화됨 → LOG_CHAT_WARNING={LOG_CHAT_WARNING}")

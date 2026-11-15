@@ -24,3 +24,12 @@ datasources:
     url: http://alertmanager:9093
     jsonData:
       implementation: prometheus
+  - name: Loki
+    uid: loki
+    type: loki
+    url: http://loki:3100
+  - name: 포트폴리오 조회
+    uid: portfolio-views
+    type: frser-sqlite-datasource
+    jsonData:
+      path: /var/lib/portfolio-views/views.db

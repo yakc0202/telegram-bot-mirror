@@ -1003,3 +1003,19 @@
   - 남은 위험(안 고침): ① read timeout은 텔레그램이 실제로 받았을 수도 있어 텍스트 폴백이 중복으로 보일 수 있음(10:18 요약 채널에 앨범과 텍스트가 둘 다 왔는지 사용자 확인 필요). ② 앨범 실패는 재전송 큐에 안 들어가 이미지가 빠짐. ③ 전송이 더 이상 줄 세워지지 않아 동시에 처리된 메시지끼리 요약 채널 순서가 바뀔 수 있음.
   - 후속 "배포해": d45767b push, 12:28 배포 성공·오류 0, 미러 dfadfbf. lg 세션 요청(앨범 전송 span이 다른 메시지 처리와 겹치는 trace 확보)을 위해 48시간 감시 걸어 둠.
   - 후속 "온거 같아"/"오류 없이 잘 온거 같은데"(처음엔 "둘 다 옴"으로 잘못 읽음. 사용자 스크린샷: 앨범 2장+요약 캡션이 10:18에 정상 게시됨 → 봇은 read timeout을 실패로 봤지만 텔레그램은 받았음. 로그상 10:18:51 텍스트 폴백도 "전송 완료"라 앨범 바로 아래에 같은 요약 텍스트가 하나 더 있어야 함): read timeout은 업로드를 다 보낸 뒤 응답만 늦은 것이라 텔레그램이 이미 올렸을 가능성이 큼. `SEND_UNCONFIRMED`(-1) 추가: 사진·앨범 전송이 `ReadTimeout`이면 이 값을 돌려주고, 호출부는 텍스트 폴백·재전송 큐 저장을 하지 않음(재전송 큐에서는 성공으로 보고 제거). `stage.send` span에 `bot.sent=false`, `bot.send_unconfirmed=true`. 봇 API 세션 재시도도 `read=2` → `read=0`(10:18 텍스트도 read timeout 뒤 자동 재전송됐음, 연결 실패 재시도는 유지). 시험: 가짜 ReadTimeout으로 앨범 함수가 -1 반환, 세션 read 재시도 0 확인. 대가: 실제로 안 올라간 경우엔 그 메시지가 빠짐(로그 경고로만 남음). push 확인 대기.
+
+### 2026-11-15 Grafana 폰으로 보기, 포트폴리오 조회수, 봇 로그 Loki·WARNING 알람
+- 요청: "배포하고 이거 grafana를 핸드폰으로 볼 방법-포트폴리오 조회수도 같이 보고 싶음 / 텔레그램 로그도 loki에 저장->grafana에서 보기->WARNING이 뜨면 텔레그램 알람 이렇게 하고 싶고 삭제는 90일마다"
+- 배포: f7378a7·665aa7b push, 16:31 배포 성공·오류 0, 미러 6593002.
+- 사용자 선택: WARNING은 봇 직접 전송을 끄고 Loki 알람으로 교체. 폰 접속은 Cloudflare Tunnel + Access(Tailscale 추천했으나 Cloudflare 선택).
+- 바뀐 것:
+  - `observability/`: Loki 3.5.1(`loki.yaml`, retention 2160h, compactor, ruler → Alertmanager), Alloy v1.9.2(`alloy.alloy`, 시각 없는 줄은 앞 줄에 붙임, 줄 앞 시각을 KST로, `level` 라벨). 로그 폴더는 `BOT_LOG_DIR`(기본 `~/Documents/logs/telegram-bot`) 읽기 전용 마운트. 처음 띄울 때 90일치(39만 줄) 채움, 그보다 오래된 줄은 거부됨(정상).
+  - `loki-rules/fake/bot-warnings.yml` `BotLogWarning`: WARNING|ERROR|CRITICAL을 메시지 앞 80자별 5분 건수로. `alertmanager.yml.tmpl` 라우트 `telegram-log`(group_interval 5m, repeat 24h, 해소 알림 없음, 무음 = 예전 줄 단위 전송과 같음).
+  - `slo-rules.yml` `LogPipelineDown`(loki·alloy up==0 10분), `prometheus.yml`에 loki·alloy 수집.
+  - Grafana: Loki·SQLite(`frser-sqlite-datasource`, `GF_PLUGINS_PREINSTALL`) 데이터 소스, 대시보드 "텔레그램 봇 로그"(등급별 건수, 많이 나온 경고, WARNING 이상, 전체 로그, 검색어 칸)와 "포트폴리오 조회"(오늘·7일·네트워크 수·마지막, 사이트별 하루 조회, 사이트별 합계, 최근 50건).
+  - `portfolio_views_sync.py` + LaunchAgent `~/Library/LaunchAgents/dev.yakc0202.portfolio-views-sync.plist`(10분, 로그 `~/Library/Logs/portfolio-views-sync.log`). 설정 `~/.config/telegram-bot/observability/portfolio.env`(PORTFOLIO_DIR=`~/Documents/portfolio-views`, D1_NAME). 첫 복사 979건(사람 294건, 11/10~).
+  - `main.py` `LOG_SHIP_WARNING`(기본 true, false면 WARNING 핸들러·전송 루프를 안 켬). `.env`에 `LOG_SHIP_WARNING=false` 추가. INFO 전송은 그대로.
+- 시험: Loki 규칙을 11/14 07:20 시점으로 돌려 ERROR 46·WARNING 28·WARNING 15건 3종류로 묶이는 것 확인. Alertmanager에 시험 경고 1건 넣어 텔레그램 전송 1건·실패 0(로그 채팅방에 "(시험)" 메시지 1건). Grafana 대시보드 패널 쿼리 모두 결과 나옴.
+- 알아둘 점: colima·Docker가 꺼지면 WARNING 알림이 통째로 멈춤(예전엔 봇이 직접 보냄). 맥 재시작 대비로 colima 로그인 자동 시작을 권함. 메시지에 숫자가 섞인 경고는 숫자마다 다른 종류로 셈. stderr.log 파일 자체(106MB, 7월부터)는 지우지 않음.
+- 막힌 것: Cloudflare Access는 Cloudflare에 등록된 본인 도메인이 있어야 하는데 계정에서 확인된 건 pages.dev뿐(wrangler 토큰에 zone 권한이 없어 직접 확인 못 함). 도메인 구매(연 1~2만 원대)와 Zero Trust 가입은 사용자가 해야 함. 결정 대기.
+- `LOG_SHIP_WARNING` 코드는 push 확인 대기(배포 전까지는 봇 직접 전송과 Loki 알람이 둘 다 옴).

@@ -182,6 +182,9 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
 - span 이름·속성을 바꾸면 `slo-rules.yml`, `tempo.yaml`의 `dimensions`, 대시보드 JSON도 같이 고친다.
 - Alertmanager 설정은 `up.sh`가 `.env`로 저장소 밖(`~/.config/telegram-bot/observability/`)에 만든다. 틀(`alertmanager.yml.tmpl`)에 보안 값을 쓰지 않는다.
 - 시험 trace는 `OTEL_SERVICE_NAME`을 `telegram-bot`이 아닌 이름으로 보내 SLO에 섞이지 않게 한다.
+- 봇 로그: Alloy가 `~/Documents/logs/telegram-bot/stderr.log`를 읽어 Loki(90일 보관)로 보낸다. WARNING 이상은 Loki 규칙(`loki-rules/fake/bot-warnings.yml`)이 메시지 앞 80자별로 5분 단위로 묶어 Alertmanager → 로그 채팅방으로 보낸다. 봇의 줄 단위 WARNING 전송은 `.env` `LOG_SHIP_WARNING=false`로 끈다.
+- 로그 수집이 멈추면 WARNING 알림도 멈추므로 `LogPipelineDown`(Prometheus)을 유지한다.
+- 포트폴리오 조회: `portfolio_views_sync.py`가 D1을 저장소 밖 SQLite(`~/.local/state/telegram-bot/portfolio-views/views.db`)로 10분마다 복사(LaunchAgent `dev.yakc0202.portfolio-views-sync`), Grafana "포트폴리오 조회" 대시보드가 읽는다. 설정은 `~/.config/telegram-bot/observability/portfolio.env`. 방문자 네트워크 이름이 담기므로 공개 주소로 열지 않는다.
 
 ### SQLite
 

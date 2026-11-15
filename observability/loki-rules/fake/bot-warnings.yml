@@ -1,0 +1,15 @@
+# 봇 로그 WARNING 이상을 텔레그램 로그 채팅방(Alertmanager)으로. 메시지 앞부분(80자)이 같은 줄끼리 묶어 건수를 센다.
+groups:
+  - name: bot-log-warnings
+    interval: 1m
+    rules:
+      - alert: BotLogWarning
+        expr: |
+          sum by (lvl, msg) (
+            count_over_time({job="telegram-bot", level=~"WARNING|ERROR|CRITICAL"}
+              | regexp "^\\S+ \\S+ \\[(?P<lvl>[A-Z]+)\\] (?P<msg>[^\\n]{1,80})" [5m])
+          ) > 0
+        labels:
+          severity: log
+        annotations:
+          summary: "{{ $labels.lvl }} {{ $value }}건: {{ $labels.msg }}"
