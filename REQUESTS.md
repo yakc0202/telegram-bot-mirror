@@ -1019,3 +1019,12 @@
 - 알아둘 점: colima·Docker가 꺼지면 WARNING 알림이 통째로 멈춤(예전엔 봇이 직접 보냄). 맥 재시작 대비로 colima 로그인 자동 시작을 권함. 메시지에 숫자가 섞인 경고는 숫자마다 다른 종류로 셈. stderr.log 파일 자체(106MB, 7월부터)는 지우지 않음.
 - 막힌 것: Cloudflare Access는 Cloudflare에 등록된 본인 도메인이 있어야 하는데 계정에서 확인된 건 pages.dev뿐(wrangler 토큰에 zone 권한이 없어 직접 확인 못 함). 도메인 구매(연 1~2만 원대)와 Zero Trust 가입은 사용자가 해야 함. 결정 대기.
 - `LOG_SHIP_WARNING` 코드는 push 확인 대기(배포 전까지는 봇 직접 전송과 Loki 알람이 둘 다 옴).
+- 후속 "push": 54f9385 배포(16:55), 재시작 후 WARNING 직접 전송 꺼짐 확인. 미러 34dbdda, 미러 `.env.example`에 `LOG_SHIP_WARNING` 추가(795ef24).
+- 폰 접속 진행: 사용자가 `miori.store`(가비아, 11/24 만료)를 Cloudflare에 추가. 스캔은 0건이었지만 가비아에 `bookmark` CNAME → `d1axyv4ccl06ny.cloudfront.net`(서랍, CloudFront)이 있어 DNS 전용으로 옮김(처음에 이름·값이 뒤바뀌고 프록시 켜진 채 들어가 고침). ACM 검증 CNAME은 가비아에 없었음(인증서 자동 갱신이 원래 안 되는 상태, 만료 예정이라 무시). 네임서버 chance/walk.ns.cloudflare.com, 11/15 22:48 .store 레지스트리 반영, 서랍 200 유지, Cloudflare 활성. 다음: 사용자 `cloudflared tunnel login`(cloudflared 2026.11.0 brew 설치함) → 터널·Access(Zero Trust 무료 플랜은 사용자 가입, 내 이메일만 허용).
+
+### 2026-11-16 앨범 전송 겹침 trace(lg 세션 요청) — 전송 안 하위 span 추가
+- 48시간 감시가 11/16 06:48에 찾음: 앨범 trace e4288257…(stage.send 06:48:39.711~43.436, 3.7초, 성공)과 다른 앨범 trace 12ab4c0e…(같은 브리핑의 두 번째 묶음, 중복 판정, 중복 안내 전송 39.719~40.228)이 겹침.
+- 한계: 겹친 0.5초가 앨범 업로드 중이었는지, 원래부터 이벤트 루프를 막지 않던 텔레그램 다운로드 중이었는지 trace로 구분 안 됨(로그상 다운로드 시작 39.713·39.859, 업로드 시작 시각은 안 남음). 그래서 수정 효과의 근거로는 약함.
+- 바꾼 것: `stage.send` 아래 `send.download`(장마다)·`send.upload`(봇 API 업로드, `_post_in_thread`) span. 시험: 가짜 앨범 전송에서 download 2개·upload 1개가 `stage.send` 자식으로 남고, ReadTimeout이면 upload ERROR + `bot.send_unconfirmed`. AGENTS.md span 구조 갱신. push 확인 대기.
+- 같이 본 것: 중복 안내(🔁)가 원본 앨범보다 3초 먼저 올라가고 "이전 요약 보기" 링크 대신 시각이 붙음(원본 링크가 전송 뒤에 저장되기 때문). 안 고침.
+- 후속 "고쳐"(중복 안내가 원본보다 먼저, 링크 없이 나감): `process_event`가 새로 등록한 항목 hash를 `_pending_entry_sends`(asyncio.Event)에 올리고 처리가 끝나면(전송·실패·잡담 모두) set. 중복 분기는 매칭 항목이 아직 대기 중이고 링크가 없으면 최대 `DUP_NOTICE_WAIT_SECONDS`(기본 120초) 기다린 뒤 안내(span 속성 `bot.dup_wait_ms`). 기다리는 동안 락은 안 쥠. 본문이 비면 등록 안 함. 시험: 같은 순서를 재현한 스크립트에서 원본 전송 → 링크 붙은 중복 안내 순서, 대기 표 비워짐. 실제 `process_event` 경로는 main() 안 클로저라 배포 후 같은 상황 로그·trace로 확인 필요. push 확인 대기(4e6f769와 함께).

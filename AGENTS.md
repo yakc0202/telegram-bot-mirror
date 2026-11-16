@@ -92,6 +92,7 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
   (`_looks_like_calendar_number`)은 제외. 키워드 점수 < `MIN_KW_SCORE_FOR_NUMBER_BOOST`(0.15)면
   숫자 기여 무시.
 - 반복 보일러플레이트(증권사 앱 안내, 세션 시점 단어 등)는 `STOPWORDS`에 추가한다.
+- 원본이 아직 요약 채널로 가는 중에 온 중복은 원본 전송이 끝날 때까지(`DUP_NOTICE_WAIT_SECONDS`, 기본 120초) 기다렸다가 링크와 함께 안내한다(`_pending_entry_sends`).
 - 중복 확인은 후보마다 따로 묻고, 요약·잡담 판단 호출에 합치지 않는다(여러 후보를 한 번에 묻거나
   합치면 새 정보를 중복으로 오판함, 근거 `docs/테스트/중복확인-합치기-C4-테스트.md`).
 - 정형 표·반복 데이터는 구분 키를 추출해 다르면 제외: `extract_bond_table_type()`(국채 만기),
@@ -177,7 +178,7 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
 
 - `observability/`: 로컬 Tempo·Prometheus·Alertmanager·Grafana(colima Docker, 포트는 127.0.0.1만). 실행 `observability/up.sh`, Grafana `http://127.0.0.1:3000`.
 - 봇은 `.env`에 `OTEL_EXPORTER_OTLP_ENDPOINT`가 있을 때만 trace를 보낸다(없으면 no-op).
-- span: `message.process`(루트, `bot.mode` live/catchup, `bot.outcome`) → `stage.*`(`bot.lock_wait_ms`)·`stage.send` → `llm.call`(논리 호출 1번, SLO 기준) → `gemini.request`(키 번호·시도 순서·HTTP 상태).
+- span: `message.process`(루트, `bot.mode` live/catchup, `bot.outcome`) → `stage.*`(`bot.lock_wait_ms`)·`stage.send`(사진·앨범은 그 아래 `send.download`·`send.upload`) → `llm.call`(논리 호출 1번, SLO 기준) → `gemini.request`(키 번호·시도 순서·HTTP 상태).
 - span에 메시지 본문·키 값·채팅방 ID를 넣지 않는다.
 - span 이름·속성을 바꾸면 `slo-rules.yml`, `tempo.yaml`의 `dimensions`, 대시보드 JSON도 같이 고친다.
 - Alertmanager 설정은 `up.sh`가 `.env`로 저장소 밖(`~/.config/telegram-bot/observability/`)에 만든다. 틀(`alertmanager.yml.tmpl`)에 보안 값을 쓰지 않는다.

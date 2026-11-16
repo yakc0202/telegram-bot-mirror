@@ -26,6 +26,7 @@ import sqlite3
 import hashlib
 import asyncio
 import contextlib
+import contextvars
 import functools
 import logging
 import tempfile
@@ -424,6 +425,19 @@ if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
     # 수집기가 꺼져 있을 때 내보내기 실패 로그가 경고 채팅방에 쌓이지 않게 함(수집기 상태는 Prometheus up으로 봄)
     logging.getLogger("opentelemetry").setLevel(logging.CRITICAL)
 tracer = trace.get_tracer("telegram-bot")
+
+
+# 새 정보로 등록됐지만 아직 요약 채널 전송이 안 끝난 항목(hash → 끝나면 set). 거의 동시에 온 중복 메시지가
+# 원본보다 먼저 안내를 올리거나 "이전 요약 보기" 링크 없이 나가지 않게 기다리는 데 씀
+_pending_entry_sends: "dict[str, asyncio.Event]" = {}
+_my_pending_entries: contextvars.ContextVar = contextvars.ContextVar("my_pending_entries", default=None)
+DUP_NOTICE_WAIT_SECONDS = float(os.environ.get("DUP_NOTICE_WAIT_SECONDS", "120"))
+
+
+async def _post_in_thread(*args, **kwargs):
+    """봇 API 업로드를 스레드에서 돌리고 span(send.upload)으로 감쌈(업로드 동안 다른 메시지 처리가 도는지 trace에서 보임)."""
+    with tracer.start_as_current_span("send.upload"):
+        return await asyncio.to_thread(requests.post, *args, **kwargs)
 
 
 # 업로드를 다 보낸 뒤 응답만 시간 초과된 전송. 텔레그램이 이미 올렸을 수 있어 실패로 보고 다시 보내면 중복이 됨
@@ -3055,12 +3069,12 @@ async def send_media_to_summary_chat(
             # (SIGKILL로 강제 종료됐던 사례의 재발 방지 차원).
             tmp_fd, tmp_path = tempfile.mkstemp(prefix="tg_media_", dir=TEMP_MEDIA_DIR)
             os.close(tmp_fd)
-            await client.download_media(message, file=tmp_path)
+            with tracer.start_as_current_span("send.download"):
+                await client.download_media(message, file=tmp_path)
             styled_caption = f"<blockquote>{html.escape(caption[:1000])}</blockquote>"
             with open(tmp_path, "rb") as f:
                 if has_real_photo(message):
-                    resp = await asyncio.to_thread(
-                        requests.post,
+                    resp = await _post_in_thread(
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
                         data={"chat_id": DIGEST_CHAT, "caption": styled_caption, "parse_mode": "HTML"},
                         files={"photo": ("photo.jpg", f)},
@@ -3068,8 +3082,7 @@ async def send_media_to_summary_chat(
                     )
                 else:
                     filename = getattr(getattr(message, "file", None), "name", None) or "file"
-                    resp = await asyncio.to_thread(
-                        requests.post,
+                    resp = await _post_in_thread(
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
                         data={"chat_id": DIGEST_CHAT, "caption": styled_caption, "parse_mode": "HTML"},
                         files={"document": (filename, f)},
@@ -3155,7 +3168,8 @@ async def send_album_to_summary_chat(
                 tmp_fd, tmp_path = tempfile.mkstemp(prefix="tg_album_", dir=TEMP_MEDIA_DIR)
                 os.close(tmp_fd)
                 tmp_paths.append(tmp_path)
-                await client.download_media(msg, file=tmp_path)
+                with tracer.start_as_current_span("send.download"):
+                    await client.download_media(msg, file=tmp_path)
                 f = open(tmp_path, "rb")
                 open_files.append(f)
 
@@ -3168,8 +3182,7 @@ async def send_album_to_summary_chat(
                 media_json.append(item)
 
             # 업로드는 최대 90초까지 걸릴 수 있어 스레드에서 돌림(이벤트 루프를 막으면 그동안 수신이 멈춤)
-            resp = await asyncio.to_thread(
-                requests.post,
+            resp = await _post_in_thread(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup",
                 data={"chat_id": DIGEST_CHAT, "media": json.dumps(media_json)},
                 files=files,
@@ -4146,7 +4159,16 @@ async def main():
             msg_date = getattr(event.message, "date", None)
             if msg_date:
                 span.set_attribute("bot.message_age_s", round((datetime.now(timezone.utc) - msg_date).total_seconds(), 1))
-            await _process_event_body(event, album_events)
+            mine = []
+            _my_pending_entries.set(mine)
+            try:
+                await _process_event_body(event, album_events)
+            finally:
+                # 이 메시지가 등록한 항목은 전송(또는 실패·잡담 처리)이 끝났으니 기다리던 중복 안내를 풀어 줌
+                for h in mine:
+                    ev = _pending_entry_sends.pop(h, None)
+                    if ev:
+                        ev.set()
 
     async def _process_event_body(event, album_events: list = None):
         # 감시 채널 메시지를 처리 시작하는 즉시 읽음 처리 대상으로 등록 — 요약이 이미
@@ -4270,9 +4292,24 @@ async def main():
             except Exception as e:
                 log.error(f"중복 판단 중 오류, 안전하게 전달함: {e}")
                 matched = None
+            if not matched and normalize(text):
+                h = exact_hash(normalize(text))
+                mine = _my_pending_entries.get()
+                if mine is not None and h not in _pending_entry_sends:
+                    _pending_entry_sends[h] = asyncio.Event()
+                    mine.append(h)
 
         if matched:
             trace.get_current_span().set_attribute("bot.outcome", "duplicate")
+            pending = _pending_entry_sends.get(matched.get("hash"))
+            if pending and not matched.get("summary_link"):
+                # 원본이 아직 요약 채널로 가는 중 → 끝날 때까지 기다려 원본 뒤에, 링크와 함께 안내
+                t0 = time.monotonic()
+                try:
+                    await asyncio.wait_for(pending.wait(), timeout=DUP_NOTICE_WAIT_SECONDS)
+                except asyncio.TimeoutError:
+                    pass
+                trace.get_current_span().set_attribute("bot.dup_wait_ms", int((time.monotonic() - t0) * 1000))
             # 오탐 대비 안전망: 중복 판정된 원문도 가볍게 남겨둠 (실시간 흐름에는 영향 없음)
             async with llm_processing_lock:
                 await asyncio.to_thread(log_duplicate, text, source_label, source_link or "", matched["text"])
