@@ -77,6 +77,8 @@ services:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
       - GF_AUTH_DISABLE_LOGIN_FORM=true
+      # 폰 접속 주소(Cloudflare Tunnel + Access). up.sh가 .env의 GRAFANA_ROOT_URL로 넣음
+      - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://127.0.0.1:3000/}
       - GF_PLUGINS_PREINSTALL=frser-sqlite-datasource
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro

@@ -6,6 +6,9 @@ cd "$(dirname "$0")"
 
 ENV_FILE="${ENV_FILE:-$HOME/.config/telegram-bot/.env}"
 export OBS_SECRETS_DIR="${OBS_SECRETS_DIR:-$HOME/.config/telegram-bot/observability}"
+# 폰에서 여는 Grafana 주소(없으면 127.0.0.1)
+GRAFANA_ROOT_URL=$(grep -E '^GRAFANA_ROOT_URL=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '"'"'"' ' || true)
+export GRAFANA_ROOT_URL
 
 token=$(grep -E '^LOG_BOT_TOKEN=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
 chat=$(grep -E '^LOG_CHAT_WARNING=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '"'"'"' ')

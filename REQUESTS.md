@@ -1028,3 +1028,11 @@
 - 바꾼 것: `stage.send` 아래 `send.download`(장마다)·`send.upload`(봇 API 업로드, `_post_in_thread`) span. 시험: 가짜 앨범 전송에서 download 2개·upload 1개가 `stage.send` 자식으로 남고, ReadTimeout이면 upload ERROR + `bot.send_unconfirmed`. AGENTS.md span 구조 갱신. push 확인 대기.
 - 같이 본 것: 중복 안내(🔁)가 원본 앨범보다 3초 먼저 올라가고 "이전 요약 보기" 링크 대신 시각이 붙음(원본 링크가 전송 뒤에 저장되기 때문). 안 고침.
 - 후속 "고쳐"(중복 안내가 원본보다 먼저, 링크 없이 나감): `process_event`가 새로 등록한 항목 hash를 `_pending_entry_sends`(asyncio.Event)에 올리고 처리가 끝나면(전송·실패·잡담 모두) set. 중복 분기는 매칭 항목이 아직 대기 중이고 링크가 없으면 최대 `DUP_NOTICE_WAIT_SECONDS`(기본 120초) 기다린 뒤 안내(span 속성 `bot.dup_wait_ms`). 기다리는 동안 락은 안 쥠. 본문이 비면 등록 안 함. 시험: 같은 순서를 재현한 스크립트에서 원본 전송 → 링크 붙은 중복 안내 순서, 대기 표 비워짐. 실제 `process_event` 경로는 main() 안 클로저라 배포 후 같은 상황 로그·trace로 확인 필요. push 확인 대기(4e6f769와 함께).
+- 12:19 근거 trace 확보: 사진 trace 214209b9…의 `send.upload` 46.207~47.858(1.65초) 동안 다른 메시지 trace f4435f86…가 요약(Gemini 46.108~47.347)을 마치고 47.351에 자기 전송을 시작(이벤트 루프가 업로드에 막혔다면 47.858 뒤로 밀렸어야 함). 사진 1장 건이라 앨범 건은 아님. lg 세션에 전달.
+
+### 2026-11-16 폰에서 Grafana (Cloudflare Tunnel + Access) 연결
+- 사용자: `cloudflared tunnel login`(miori.store 승인), Zero Trust 가입(팀 plain-wind-f71d), Access 앱 `grafana`(grafana.miori.store, 정책 "나만"=내 이메일, 자체 호스팅).
+- 바뀐 것: 터널 `grafana-mac`(id 01e1e732-…), DNS `grafana.miori.store` CNAME(프록시) 자동 추가. `~/.cloudflared/config.yml`: grafana.miori.store → http://127.0.0.1:3000, `originRequest.access.required`(팀·AUD) → Cloudflare Access 설정이 빠져도 터널이 토큰 없는 요청을 거절. 나머지 주소 404. 인증 파일 600. LaunchAgent `~/Library/LaunchAgents/dev.yakc0202.cloudflared-grafana.plist`(로그 `~/Library/Logs/cloudflared-grafana.log`, KeepAlive). `docker-compose.yml` `GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://127.0.0.1:3000/}`, `up.sh`가 `.env` `GRAFANA_ROOT_URL`을 넘김, `.env`에 `GRAFANA_ROOT_URL=https://grafana.miori.store/`.
+- 확인: 터널 연결 2개(icn05·icn06). 외부에서 토큰 없이 접속하면 Access 로그인으로 302, 가짜 JWT 헤더도 302. 실제 폰 로그인은 사용자 확인 대기.
+- 알아둘 점: LaunchAgent라 맥에 로그인돼 있어야 터널이 돎. miori.store는 11/24 만료 → 새 도메인 사면 zone 추가, `cloudflared tunnel route dns grafana-mac <새 주소>`, config hostname, Access 앱 도메인, `.env` GRAFANA_ROOT_URL 바꾸고 `up.sh`. 서랍(bookmark.miori.store)도 그날 끊김.
+- observability 파일이 바뀌어 push하면 봇이 재시작됨 → push 확인 대기.
