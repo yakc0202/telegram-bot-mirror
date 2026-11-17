@@ -1036,3 +1036,9 @@
 - 확인: 터널 연결 2개(icn05·icn06). 외부에서 토큰 없이 접속하면 Access 로그인으로 302, 가짜 JWT 헤더도 302. 실제 폰 로그인은 사용자 확인 대기.
 - 알아둘 점: LaunchAgent라 맥에 로그인돼 있어야 터널이 돎. miori.store는 11/24 만료 → 새 도메인 사면 zone 추가, `cloudflared tunnel route dns grafana-mac <새 주소>`, config hostname, Access 앱 도메인, `.env` GRAFANA_ROOT_URL 바꾸고 `up.sh`. 서랍(bookmark.miori.store)도 그날 끊김.
 - observability 파일이 바뀌어 push하면 봇이 재시작됨 → push 확인 대기.
+
+### 2026-11-17 08:45 요약이 "이 소식"만 온 두 건 + 잘못 온 것을 채팅방에 모으면 자동 수정(계획만)
+- 요청: "오늘 오전 8:45에 온 채팅 두건 요약이 이 소식 이렇게만 왔는데 확인하고, 내가 잘못오거나 이상한 것을 채팅방에 저장하면 너가 읽고 알아서 코드를 고치게 하고 싶은데 토큰 안 쓰고 할 수 있는 방법-계획만"
+- 08:45 진단(진행 중): 그 시각 전달은 '전설적인 투자자인 드라켄도 반도체 정리했습니다.'(이미지+요약, 08:45:04), '여러 투자자들이…'(잡담 판정, 08:45:09), '버크셔 해서웨이 내부자, 추가 불타기 매수 / 매도는 없음'(미국 주식 인사이더, 이미지 전송이 Connection reset → 텍스트 폴백 08:45:30 + 재전송 큐로 이미지 08:45:51, 같은 요약이 두 번 올라감). 로그·DB에는 LLM 원문이 안 남아 "이 소식"이 어디서 나왔는지 확인 불가. 같은 두 문장으로 `summarize_message(with_category=True)`를 다시 돌리면 finishReason STOP, 정상 두 줄(잘림 없음). DB의 드라켄 summary_text는 "…단기적으로 반도체 관련 종"에서 끊겨 있음(저장 단계 자르기인지 미확인). 사용자 스크린샷 요청.
+- 진단 이어서: DB 최근 이틀 요약 203건 중 18건이 문장 중간에서 끊김(11/16 15건/183, 11/17 3건/20; "밴스 미국" 5자, "넥스트아이는 … 올해" 34자 등). 끊긴 건 하나("밴스 부통령…")를 같은 프롬프트로 15번 다시 돌려도 모두 finishReason STOP·80~110토큰·정상 → 출력 토큰 한도 문제로는 재현 안 됨. 코드가 `candidates[0].content.parts[0].text`만 읽고 있어, Gemini가 답을 여러 조각으로 나눠 보내면 첫 조각만 쓰임 → 가장 유력한 원인(직접 재현은 못 함).
+- 고친 것: `_gemini_request`가 생각(thought) 조각을 뺀 글자 조각을 모두 이어 붙임, 조각이 없으면 예외(예전처럼 실패 처리). `gemini.request` span에 `gen_ai.response.finish_reasons`·`gemini.text_parts`, finishReason이 STOP이 아니면 WARNING(→ Loki 알람). 시험: 가짜 응답 4종(여러 조각 → 이어 붙임, 생각 조각 → 제외, MAX_TOKENS → 경고 후 그대로, 빈 응답 → 예외). push 확인 대기. 배포 후 끊긴 요약 비율과 `gemini.text_parts`>1·finishReason 기록으로 원인 확인.

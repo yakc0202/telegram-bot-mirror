@@ -1567,7 +1567,17 @@ def _gemini_request(key: str, prompt: str, max_tokens: int, attempt: int) -> str
         )
         span.set_attribute("http.response.status_code", resp.status_code)
         resp.raise_for_status()
-        return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        cand = resp.json()["candidates"][0]
+        # 답이 여러 조각(parts)으로 나뉘어 올 수 있어 생각(thought) 조각을 뺀 글자 조각을 모두 이음.
+        # 첫 조각만 쓰면 요약이 "이 소식"처럼 앞 몇 글자에서 끊김
+        parts = [p for p in cand.get("content", {}).get("parts", []) if "text" in p and not p.get("thought")]
+        finish = cand.get("finishReason", "")
+        span.set_attributes({"gen_ai.response.finish_reasons": finish, "gemini.text_parts": len(parts)})
+        if finish and finish != "STOP":
+            log.warning(f"Gemini 응답이 끝까지 생성되지 않음 (finishReason={finish}, 키 #{_gemini_key_no(key)})")
+        if not parts:
+            raise ValueError(f"Gemini 응답에 글자 조각이 없음 (finishReason={finish})")
+        return "".join(p["text"] for p in parts).strip()
 
 
 def _call_gemini(prompt: str, max_tokens: int) -> str:
