@@ -36,5 +36,5 @@ receivers:
         disable_notifications: true
         message: |-
           📋 봇 로그 경고 {{ len .Alerts.Firing }}종류 (최근 5분)
-          {{ range .Alerts.Firing }}• {{ .Annotations.summary | html }}
-          {{ end }}
+          <pre>{{ range .Alerts.Firing }}{{ .Annotations.summary | html }}
+          {{ end }}</pre>

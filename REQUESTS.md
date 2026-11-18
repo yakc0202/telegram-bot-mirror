@@ -1061,3 +1061,8 @@
 - 결정: 새 봇 대신 로그용 봇을 쓴다(그 토큰으로 getUpdates·webhook을 쓰는 곳이 없음). 저장한 메시지는 봇이 못 읽으므로 사용자가 따로 그룹을 만들었다. 로그용 봇은 관리자이고 메시지 삭제 권한이 있다.
 - 알아둘 점: 봇은 48시간 지난 메시지를 못 지운다(남은 개수를 방에 알림). 세션 감시는 이 Claude 세션이 열려 있을 때만 돈다. 꺼져 있으면 '처리'에 "세션이 꺼져 있다"고 답하고, 다음 세션에서 `feedback.py status`부터 본다. 첫 'push'는 LaunchAgent 환경에서 git 자격 증명(osxkeychain)이 되는지 처음 확인하는 셈이다.
 - 시험: collect가 사용자의 시험 글('.', id 2)을 inbox에 쌓는 것까지 확인했다.
+
+### 2026-11-18 "에테르의 일본&미국 리서치" 감시 채널 추가 + 봇 로그를 코드 블록으로
+- 상태: 완료 (cb8c1a5 push함)
+- 채널: 봇 세션 캐시(Telethon `entities`를 읽기 전용으로 조회)에서 새 채널 ID를 찾았다(@aethersemiconductor). `list_chats.py`는 따로 쓰는 세션 파일이 없어 로그인 코드가 필요하므로 쓰지 않았다. `.env` `SOURCE_CHATS` 끝에 넣었고(19→20개, `.env.bak-*` 백업), `launchctl kickstart`로 16:10에 재시작했다. 로그에 `[catch-up] 에테르의 일본&미국 리서치: 첫 감시…`가 찍혔고 재시작 뒤 ERROR는 0이다. 예전 채널 "(구)에테르의 일본&미국 리서치"는 사용자 요청으로 뺐다(20→19개, 재시작).
+- 로그 형식: INFO 로그(봇 → 로그 채팅방)는 원래 `<pre>` 코드 블록이었다. WARNING은 Loki 알림으로 바뀐 뒤 `•` 목록이었다. `observability/alertmanager.yml.tmpl`의 `telegram-log` 메시지를 `<pre>`로 감쌌다(요약은 `| html` 이스케이프 유지). `up.sh alertmanager`와 `/-/reload`로 반영했다. `<a&b>`가 든 시험 알림 1건을 보냈고, Telegram 전송 실패 카운터는 0이다.
