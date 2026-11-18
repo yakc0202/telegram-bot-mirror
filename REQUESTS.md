@@ -1053,3 +1053,11 @@
 - 진단: c128b50 배포 뒤 11/17 12:17부터 11/18 08:33까지 `finishReason=MAX_TOKENS` WARNING이 17건 나왔다. Tempo에서 17건 모두 `stage.classify` 아래 `llm.call`(`llm.max_tokens`=5)이었다. 원인은 `classify_is_stock_related`의 잡담 판정 호출이다. 글로벌 뉴스 브리핑, 컨퍼런스콜 정리 같은 긴 메시지에서 한 단어 답이 5토큰 한도에 걸렸다. 17건 모두 다음 줄에서 정상 처리(STOCK 통과)됐고, 요약이 잘린 것은 아니다. 다만 'OPINION'이 'OPIN'처럼 잘리면 기존 코드는 CHITCHAT으로 떨어져 정보가 버려질 수 있었다.
 - 처리: 판정 한도를 5에서 16으로 올렸다. 답은 앞부분으로 본다: OPIN이면 OPINION, CHIT이면 CHITCHAT, 그 밖에 알아볼 수 없는 답은 STOCK(통과). 실제 긴 메시지 3건(컨콜 추가 내용, 미장 마감, 글로벌 뉴스 브리핑)으로 다시 돌려 보니 모두 STOCK이었고 MAX_TOKENS 경고는 0건이었다.
 - 로그용 봇: 피드백 방 수집에 써도 된다. 봇과 Alertmanager는 `LOG_BOT_TOKEN`으로 보내기만 하고 getUpdates와 webhook을 쓰지 않으므로, 셸이 getUpdates로 읽어도 충돌하지 않는다. 그 봇을 피드백 그룹에 관리자로 넣으면 된다(새 봇 불필요).
+
+### 2026-11-18 피드백 방: 셸이 10분마다 수집하고, Claude는 고칠 때만 깨어나고, 'push'로 배포·일괄 삭제
+- 상태: 완료 (실제 피드백으로 한 바퀴 도는 것은 아직 확인 전)
+- 사용자 제안: 셸이 10분마다 방을 읽으면 기다리는 데 비용이 들지 않고 고칠 때만 비용이 든다. 고친 점을 방에 보내면 사용자가 'push'라고 하고, 다 반영되면 메시지를 일괄 삭제한다.
+- 바뀐 것: `feedback/feedback.py`(collect·report·status, 표준 라이브러리만 사용). LaunchAgent `~/Library/LaunchAgents/dev.yakc0202.telegram-feedback.plist`(600초, 로그 `~/Library/Logs/telegram-feedback.log`). `.env`에 `FEEDBACK_CHAT`(그룹 "텔래그램 주식 요약 봇", 슈퍼그룹으로 바뀐 ID)과 `FEEDBACK_OWNER_ID`. 상태는 `~/.local/state/telegram-bot/feedback/`. AGENTS.md에 규칙을 추가했다.
+- 결정: 새 봇 대신 로그용 봇을 쓴다(그 토큰으로 getUpdates·webhook을 쓰는 곳이 없음). 저장한 메시지는 봇이 못 읽으므로 사용자가 따로 그룹을 만들었다. 로그용 봇은 관리자이고 메시지 삭제 권한이 있다.
+- 알아둘 점: 봇은 48시간 지난 메시지를 못 지운다(남은 개수를 방에 알림). 세션 감시는 이 Claude 세션이 열려 있을 때만 돈다. 꺼져 있으면 '처리'에 "세션이 꺼져 있다"고 답하고, 다음 세션에서 `feedback.py status`부터 본다. 첫 'push'는 LaunchAgent 환경에서 git 자격 증명(osxkeychain)이 되는지 처음 확인하는 셈이다.
+- 시험: collect가 사용자의 시험 글('.', id 2)을 inbox에 쌓는 것까지 확인했다.

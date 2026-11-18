@@ -188,6 +188,13 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
 - 폰 접속: Cloudflare Tunnel(`~/.cloudflared/config.yml`, LaunchAgent `dev.yakc0202.cloudflared-grafana`) → `127.0.0.1:3000`, Cloudflare Access(내 이메일만)로 막고 터널도 Access JWT(`originRequest.access`)를 검사한다. Grafana는 익명 관리자라 Access 없이 터널을 켜지 않는다. 주소는 `.env` `GRAFANA_ROOT_URL`(up.sh가 넘김).
 - 포트폴리오 조회: `portfolio_views_sync.py`가 D1을 저장소 밖 SQLite(`~/.local/state/telegram-bot/portfolio-views/views.db`)로 10분마다 복사(LaunchAgent `dev.yakc0202.portfolio-views-sync`), Grafana "포트폴리오 조회" 대시보드가 읽는다. 설정은 `~/.config/telegram-bot/observability/portfolio.env`. 방문자 네트워크 이름이 담기므로 공개 주소로 열지 않는다.
 
+### 피드백 방 (`feedback/feedback.py`)
+
+- 사용자가 피드백 그룹(`.env` `FEEDBACK_CHAT`, 로그용 봇이 관리자)에 잘못된 요약을 전달하거나 글을 쓰면, LaunchAgent `dev.yakc0202.telegram-feedback`가 10분마다 `collect`로 `~/.local/state/telegram-bot/feedback/inbox.jsonl`에 쌓는다. LLM은 부르지 않는다.
+- 명령은 `FEEDBACK_OWNER_ID`가 쓴 것만 받는다: '처리'는 `wake` 파일을 만들고, 'push'는 보고한 커밋이 HEAD와 같고 변경이 없을 때만 push와 미러 반영을 한 뒤 처리한 메시지를 지운다. '상태'는 쌓인 건수를 알려 준다.
+- Claude 세션은 `wake`를 기다리는 백그라운드 감시를 걸어 두고(`watcher.pid`), 깨어나면 `feedback.py status`로 피드백을 읽어 고치고 시험하고 커밋한 뒤 `feedback.py report <커밋> <보고문 파일> <처리한 id,...>`로 방에 보고한다. 직접 push하지 않는다.
+- 고칠 수 없거나 판단이 필요한 피드백은 처리 id에서 빼고 보고문에 이유를 쓴다(방에 남는다).
+
 ### SQLite
 
 - `text_factory`는 `errors="replace"`.
