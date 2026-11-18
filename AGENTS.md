@@ -46,7 +46,7 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
 
 1. `python3 -m py_compile main.py`로 문법 확인, 가능하면 실제 데이터로 dry-run.
 2. 커밋 후 `git push origin main`. push하면 self-hosted Actions가 봇을 재시작하므로
-   **push 전에 사용자 확인을 받는다**. `*.md`만 바뀐 push는 배포하지 않는다.
+   **push 전에 사용자 확인을 받는다**. `*.md`·`observability/`·`feedback/`만 바뀐 push는 배포하지 않는다(두 폴더는 `~/telegram-bot`에서 바로 쓰므로 그곳에서 고친다).
 3. `./mirror-push.sh --push`로 공개 미러에 반영.
 4. 위 단계를 하나라도 못 했으면 "완료"라 하지 않고 남은 일을 기록·보고한다.
 

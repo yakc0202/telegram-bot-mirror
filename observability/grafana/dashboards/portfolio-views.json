@@ -274,8 +274,8 @@
             "type": "frser-sqlite-datasource",
             "uid": "portfolio-views"
           },
-          "queryText": "SELECT strftime('%m-%d %H:%M', ts, '+9 hours') AS 시각, CASE WHEN length(path) > 38 THEN substr(substr(path, 39), 1, instr(substr(path, 39) || '/', '/') - 1) WHEN path = '/' THEN '(첫 화면)' ELSE path END AS 사이트, country || ' ' || city AS 지역, org AS 네트워크, referrer AS 앞페이지 FROM views WHERE bot = 0 ORDER BY ts DESC LIMIT 50",
-          "rawQueryText": "SELECT strftime('%m-%d %H:%M', ts, '+9 hours') AS 시각, CASE WHEN length(path) > 38 THEN substr(substr(path, 39), 1, instr(substr(path, 39) || '/', '/') - 1) WHEN path = '/' THEN '(첫 화면)' ELSE path END AS 사이트, country || ' ' || city AS 지역, org AS 네트워크, referrer AS 앞페이지 FROM views WHERE bot = 0 ORDER BY ts DESC LIMIT 50",
+          "queryText": "SELECT strftime('%m-%d %H:%M', ts, '+9 hours') AS 시각, CASE WHEN length(path) > 38 THEN substr(substr(path, 39), 1, instr(substr(path, 39) || '/', '/') - 1) WHEN path = '/' THEN '(첫 화면)' ELSE path END AS 사이트, country || ' ' || city AS 지역, org AS 네트워크, referrer AS 앞페이지 FROM views WHERE bot = 0 AND status = 200 ORDER BY ts DESC LIMIT 50",
+          "rawQueryText": "SELECT strftime('%m-%d %H:%M', ts, '+9 hours') AS 시각, CASE WHEN length(path) > 38 THEN substr(substr(path, 39), 1, instr(substr(path, 39) || '/', '/') - 1) WHEN path = '/' THEN '(첫 화면)' ELSE path END AS 사이트, country || ' ' || city AS 지역, org AS 네트워크, referrer AS 앞페이지 FROM views WHERE bot = 0 AND status = 200 ORDER BY ts DESC LIMIT 50",
           "queryType": "table",
           "timeColumns": [
             "time"

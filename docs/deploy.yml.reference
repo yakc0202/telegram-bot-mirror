@@ -7,6 +7,9 @@ on:
       - "**.md"
       - "mirror-push.sh"
       - ".gitignore"
+      # 봇이 쓰지 않음: Grafana·셸이 ~/telegram-bot에서 바로 읽음
+      - "observability/**"
+      - "feedback/**"
 
 jobs:
   deploy:

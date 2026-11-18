@@ -1066,3 +1066,18 @@
 - 상태: 완료 (cb8c1a5 push함)
 - 채널: 봇 세션 캐시(Telethon `entities`를 읽기 전용으로 조회)에서 새 채널 ID를 찾았다(@aethersemiconductor). `list_chats.py`는 따로 쓰는 세션 파일이 없어 로그인 코드가 필요하므로 쓰지 않았다. `.env` `SOURCE_CHATS` 끝에 넣었고(19→20개, `.env.bak-*` 백업), `launchctl kickstart`로 16:10에 재시작했다. 로그에 `[catch-up] 에테르의 일본&미국 리서치: 첫 감시…`가 찍혔고 재시작 뒤 ERROR는 0이다. 예전 채널 "(구)에테르의 일본&미국 리서치"는 사용자 요청으로 뺐다(20→19개, 재시작).
 - 로그 형식: INFO 로그(봇 → 로그 채팅방)는 원래 `<pre>` 코드 블록이었다. WARNING은 Loki 알림으로 바뀐 뒤 `•` 목록이었다. `observability/alertmanager.yml.tmpl`의 `telegram-log` 메시지를 `<pre>`로 감쌌다(요약은 `| html` 이스케이프 유지). `up.sh alertmanager`와 `/-/reload`로 반영했다. `<a&b>`가 든 시험 알림 1건을 보냈고, Telegram 전송 실패 카운터는 0이다.
+
+### 2026-11-18 포트폴리오 조회에 /.git/HEAD, /.git/config가 왜 찍히는지
+- 상태: 완료 (대시보드 커밋은 push 확인 대기, Grafana에는 이미 반영)
+- 진단: 사람이 아니라 자동 스캐너다. 인터넷 전체 사이트를 돌며 실수로 공개된 `.git` 폴더(소스·설정 유출)를 찾는다. `views.db`에서 `/.git/*`, `/.ssh/id_rsa`, `/.bash_history` 같은 경로는 전부 404였다. 사이트에 그런 파일이 없으니 털린 것은 없다. Chrome인 척하는 UA라 middleware의 봇 판정(UA 정규식)을 지나쳤다. 확장자가 없는 경로라 페이지 조회로 기록됐다.
+- 처리: 다른 패널은 이미 `status = 200`만 셌다. "최근 조회" 표(raw 포함 2곳)만 이 조건이 없어서 `AND status = 200`을 넣었다. 파일 프로비저닝으로 Grafana에 반영된 것을 API로 확인했다.
+- 후속 질문 "스캐너에 걸리는 보안 설정은 없지?": 실제 주소에 흔히 노리는 경로를 찔러 봤다(외부 curl).
+  - miori.pages.dev: 배포 폴더는 `site/`(HTML·폰트·`_headers`)뿐이다. `/.git/config`, `/.env`, `/wrangler.toml`, `/functions/_middleware.js`, `/views.sh`, `/README.md` 등은 모두 404였다. 헤더는 noindex, `X-Frame-Options: DENY`, nosniff.
+  - grafana.miori.store: 모든 경로가 Access 로그인(302)으로 간다.
+  - bookmark.miori.store: 모든 경로가 200이지만, 응답 내용이 첫 화면 index.html과 같다(SPA 대체 응답). 실제 파일은 노출되지 않는다.
+  - miori.store 루트는 레코드가 없어 응답하지 않는다.
+
+### 2026-11-18 대시보드 수정·점검 기록만 올려도 봇이 재시작되는 이유
+- 상태: 완료
+- 원인: `deploy.yml`의 `paths-ignore`가 `**.md`, `mirror-push.sh`, `.gitignore`뿐이었다. 그래서 봇과 무관한 `observability/`, `feedback/` 변경도 rsync와 봇 재시작을 불렀다.
+- 처리: `paths-ignore`에 `observability/**`, `feedback/**`를 넣었다. 두 폴더는 Grafana(마운트)와 LaunchAgent가 `~/telegram-bot`에서 바로 읽으므로 배포 복사가 필요 없다. AGENTS.md 배포 규칙도 고쳤다. 이 push는 deploy.yml이 바뀌어 한 번 재시작된다(미뤄 둔 faf2418, e0b9559와 함께 올림).
