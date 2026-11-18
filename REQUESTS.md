@@ -1049,7 +1049,7 @@
 - 알아둘 점: 또 안 되면 먼저 이 순서로 본다. `docker compose ps` → `curl 127.0.0.1:3000/api/health` → `launchctl list | grep cloudflared` → `~/Library/Logs/cloudflared-grafana*.log` → 외부 `curl -I https://grafana.miori.store`(302가 Access로 가면 서버 쪽은 정상).
 
 ### 2026-11-18 Gemini 응답 잘림(finishReason=MAX_TOKENS) 알람 확인 + 피드백 방에 로그용 봇을 써도 되는지
-- 상태: 진행중 (고침, push 확인 대기)
+- 상태: 완료 (9b38a1f 배포 09:21, 재시작 뒤 ERROR 0, 미러 3a2375d). 남은 확인: MAX_TOKENS WARNING이 더 오는지
 - 진단: c128b50 배포 뒤 11/17 12:17부터 11/18 08:33까지 `finishReason=MAX_TOKENS` WARNING이 17건 나왔다. Tempo에서 17건 모두 `stage.classify` 아래 `llm.call`(`llm.max_tokens`=5)이었다. 원인은 `classify_is_stock_related`의 잡담 판정 호출이다. 글로벌 뉴스 브리핑, 컨퍼런스콜 정리 같은 긴 메시지에서 한 단어 답이 5토큰 한도에 걸렸다. 17건 모두 다음 줄에서 정상 처리(STOCK 통과)됐고, 요약이 잘린 것은 아니다. 다만 'OPINION'이 'OPIN'처럼 잘리면 기존 코드는 CHITCHAT으로 떨어져 정보가 버려질 수 있었다.
 - 처리: 판정 한도를 5에서 16으로 올렸다. 답은 앞부분으로 본다: OPIN이면 OPINION, CHIT이면 CHITCHAT, 그 밖에 알아볼 수 없는 답은 STOCK(통과). 실제 긴 메시지 3건(컨콜 추가 내용, 미장 마감, 글로벌 뉴스 브리핑)으로 다시 돌려 보니 모두 STOCK이었고 MAX_TOKENS 경고는 0건이었다.
 - 로그용 봇: 피드백 방 수집에 써도 된다. 봇과 Alertmanager는 `LOG_BOT_TOKEN`으로 보내기만 하고 getUpdates와 webhook을 쓰지 않으므로, 셸이 getUpdates로 읽어도 충돌하지 않는다. 그 봇을 피드백 그룹에 관리자로 넣으면 된다(새 봇 불필요).
