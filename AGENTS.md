@@ -33,6 +33,7 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
   해시·전화번호·감시 채널).
 - `mirror-push.sh`는 `.env`에서 그 값을 읽어 가리고, 보안 값 모양이 남으면 push하지 않는다.
   새 보안 값은 `.env`에 두거나 스크립트 검사 패턴에 추가한다.
+- 채널·채팅방 ID는 `.env`에서 빠지면 가려지지 않으므로 `REQUESTS.md`·커밋 메시지에 숫자 ID를 쓰지 않고 제목이나 @username으로 적는다.
 - `.env`에 없는 사람 이름·채널 제목은 `~/.config/telegram-bot/mirror-deny.txt`(저장소 밖, 한 줄에 하나)에 두면 `mirror-push.sh`가 `<비공개>`로 가린다.
 - `mirror-push.sh`는 파일 내용·파일 이름·커밋 메시지를 검사하고, 멈출 때 값 대신 파일·줄·종류만 찍는다.
 - `REQUESTS.md`도 보안 값을 가려서 미러에 올린다. 공개하면 안 되는 항목은 제목 줄에
