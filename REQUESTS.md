@@ -1042,3 +1042,14 @@
 - 08:45 진단(진행 중): 그 시각 전달은 '전설적인 투자자인 드라켄도 반도체 정리했습니다.'(이미지+요약, 08:45:04), '여러 투자자들이…'(잡담 판정, 08:45:09), '버크셔 해서웨이 내부자, 추가 불타기 매수 / 매도는 없음'(미국 주식 인사이더, 이미지 전송이 Connection reset → 텍스트 폴백 08:45:30 + 재전송 큐로 이미지 08:45:51, 같은 요약이 두 번 올라감). 로그·DB에는 LLM 원문이 안 남아 "이 소식"이 어디서 나왔는지 확인 불가. 같은 두 문장으로 `summarize_message(with_category=True)`를 다시 돌리면 finishReason STOP, 정상 두 줄(잘림 없음). DB의 드라켄 summary_text는 "…단기적으로 반도체 관련 종"에서 끊겨 있음(저장 단계 자르기인지 미확인). 사용자 스크린샷 요청.
 - 진단 이어서: DB 최근 이틀 요약 203건 중 18건이 문장 중간에서 끊김(11/16 15건/183, 11/17 3건/20; "밴스 미국" 5자, "넥스트아이는 … 올해" 34자 등). 끊긴 건 하나("밴스 부통령…")를 같은 프롬프트로 15번 다시 돌려도 모두 finishReason STOP·80~110토큰·정상 → 출력 토큰 한도 문제로는 재현 안 됨. 코드가 `candidates[0].content.parts[0].text`만 읽고 있어, Gemini가 답을 여러 조각으로 나눠 보내면 첫 조각만 쓰임 → 가장 유력한 원인(직접 재현은 못 함).
 - 고친 것: `_gemini_request`가 생각(thought) 조각을 뺀 글자 조각을 모두 이어 붙임, 조각이 없으면 예외(예전처럼 실패 처리). `gemini.request` span에 `gen_ai.response.finish_reasons`·`gemini.text_parts`, finishReason이 STOP이 아니면 WARNING(→ Loki 알람). 시험: 가짜 응답 4종(여러 조각 → 이어 붙임, 생각 조각 → 제외, MAX_TOKENS → 경고 후 그대로, 빈 응답 → 예외). push 확인 대기. 배포 후 끊긴 요약 비율과 `gemini.text_parts`>1·finishReason 기록으로 원인 확인.
+
+### 2026-11-17 Grafana(grafana.miori.store)가 폰·맥에서 안 열림 → 다시 됨
+- 상태: 완료
+- 처리: 확인 당시 맥 쪽은 모두 정상이었다. Grafana `127.0.0.1:3000/api/health`는 200, 컨테이너 6개 Up, LaunchAgent `dev.yakc0202.cloudflared-grafana`가 실행 중이었다. 인터넷에서 grafana.miori.store를 열면 Access 로그인(plain-wind-f71d)으로 302 됐다. cloudflared 로그에는 09:33 KST에 4개 연결이 모두 `timeout: no recent network activity`로 끊겼다가 1~13초 안에 다시 등록된 기록만 있었다. 사용자가 다시 열어 보니 됐다. 원인은 확정하지 못했다. 맥 네트워크가 잠깐 끊겼거나(잠자기·와이파이), 브라우저가 예전 로그인 화면을 붙들고 있었을 수 있다.
+- 알아둘 점: 또 안 되면 먼저 이 순서로 본다. `docker compose ps` → `curl 127.0.0.1:3000/api/health` → `launchctl list | grep cloudflared` → `~/Library/Logs/cloudflared-grafana*.log` → 외부 `curl -I https://grafana.miori.store`(302가 Access로 가면 서버 쪽은 정상).
+
+### 2026-11-18 Gemini 응답 잘림(finishReason=MAX_TOKENS) 알람 확인 + 피드백 방에 로그용 봇을 써도 되는지
+- 상태: 진행중 (고침, push 확인 대기)
+- 진단: c128b50 배포 뒤 11/17 12:17부터 11/18 08:33까지 `finishReason=MAX_TOKENS` WARNING이 17건 나왔다. Tempo에서 17건 모두 `stage.classify` 아래 `llm.call`(`llm.max_tokens`=5)이었다. 원인은 `classify_is_stock_related`의 잡담 판정 호출이다. 글로벌 뉴스 브리핑, 컨퍼런스콜 정리 같은 긴 메시지에서 한 단어 답이 5토큰 한도에 걸렸다. 17건 모두 다음 줄에서 정상 처리(STOCK 통과)됐고, 요약이 잘린 것은 아니다. 다만 'OPINION'이 'OPIN'처럼 잘리면 기존 코드는 CHITCHAT으로 떨어져 정보가 버려질 수 있었다.
+- 처리: 판정 한도를 5에서 16으로 올렸다. 답은 앞부분으로 본다: OPIN이면 OPINION, CHIT이면 CHITCHAT, 그 밖에 알아볼 수 없는 답은 STOCK(통과). 실제 긴 메시지 3건(컨콜 추가 내용, 미장 마감, 글로벌 뉴스 브리핑)으로 다시 돌려 보니 모두 STOCK이었고 MAX_TOKENS 경고는 0건이었다.
+- 로그용 봇: 피드백 방 수집에 써도 된다. 봇과 Alertmanager는 `LOG_BOT_TOKEN`으로 보내기만 하고 getUpdates와 webhook을 쓰지 않으므로, 셸이 getUpdates로 읽어도 충돌하지 않는다. 그 봇을 피드백 그룹에 관리자로 넣으면 된다(새 봇 불필요).

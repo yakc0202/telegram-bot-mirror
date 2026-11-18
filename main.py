@@ -1279,16 +1279,18 @@ def classify_is_stock_related(text: str, urls: set) -> str:
         "답은 반드시 STOCK, CHITCHAT, OPINION 중 하나만 답해.\n\n"
         f"[메시지]\n{text}"
     )
-    answer = call_llm(prompt, max_tokens=5)
+    # 한 단어 답이라도 5토큰이면 한도에 걸려 잘림(MAX_TOKENS) → 여유를 둔다
+    answer = call_llm(prompt, max_tokens=16)
     if answer is None:
         # 판단 실패 시, 놓치는 것보다 안전하게 통과시키는 쪽을 택함
         return "STOCK"
     answer = answer.strip().upper()
-    if answer.startswith("OPINION"):
+    # 답이 잘려도('OPIN') 알아보게 앞부분으로 보고, 알아볼 수 없으면 버리지 않고 통과시킨다
+    if answer.startswith("OPIN"):
         return "OPINION"
-    if answer.startswith("STOCK"):
-        return "STOCK"
-    return "CHITCHAT"
+    if answer.startswith("CHIT"):
+        return "CHITCHAT"
+    return "STOCK"
 
 
 # 흔한 한국어 조사(은/는/이/가/을/를/으로 등). 길이가 긴 것부터 검사해야
