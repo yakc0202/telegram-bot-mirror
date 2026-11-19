@@ -1081,3 +1081,15 @@
 - 상태: 완료
 - 원인: `deploy.yml`의 `paths-ignore`가 `**.md`, `mirror-push.sh`, `.gitignore`뿐이었다. 그래서 봇과 무관한 `observability/`, `feedback/` 변경도 rsync와 봇 재시작을 불렀다.
 - 처리: `paths-ignore`에 `observability/**`, `feedback/**`를 넣었다. 두 폴더는 Grafana(마운트)와 LaunchAgent가 `~/telegram-bot`에서 바로 읽으므로 배포 복사가 필요 없다. AGENTS.md 배포 규칙도 고쳤다. 이 push는 deploy.yml이 바뀌어 한 번 재시작된다(미뤄 둔 faf2418, e0b9559와 함께 올림).
+
+### 2026-11-19 피드백 방에 쓴 글을 왜 처리 안 하는지 + 18:01 "정량 시장 데이터를 하나도 못 가져옴" 경고
+- 상태: 진행중 (고침, 피드백 방에서 'push' 대기)
+- 처리 안 된 이유: 설계상 '처리'라고 써야 세션을 깨운다. 사용자는 경고를 전달하고 "이게 뭐야"만 써서 inbox에 2건이 쌓인 채로 있었다(수집 셸과 세션 감시는 정상).
+- 진단: 11/18 18:00 정리와 11/19 08:00 정리에서 yfinance 티커가 전부 `'NoneType' object is not subscriptable`로 실패했다. 정리는 정량 데이터 없이 나갔다. 11/18 08:00까지는 정상이었다. yfinance 1.2.0 `scrapers/history.py`는 요청 중 생긴 예외(연결 오류, JSON 오류 등)를 숨기고 `data=None`인 채로 `data['chart']`를 읽는다. 그래서 진짜 원인은 로그에 남지 않았다. 지금 같은 코드를 돌리면 13개 모두 정상(응답 200)이라 일시적 장애로 본다.
+- 처리: `_fetch_yfinance_quant`를 `_fetch_yfinance_once`로 나눴다. `history(..., raise_errors=True)`로 진짜 오류가 로그에 남게 했다. 전부 실패하면 `YFINANCE_RETRY_DELAY`(기본 30초) 뒤 한 번 더 시도하고, 그래도 0개면 WARNING을 남긴다. 정상, 첫 시도 실패 후 재시도 성공, 계속 실패의 세 경우를 시험해 통과했다. 정리는 to_thread에서 부르므로 sleep이 이벤트 루프를 막지 않는다.
+- 다음: 또 실패하면 로그의 실제 오류 문구를 보고 원인(Yahoo 차단, 네트워크, 쿠키)을 정한다.
+- 후속 요청: "진짜 로그는 어떻게 남기나 / 10분마다 가져가다 새 메시지가 있으면 깨어나서 처리 / 재시도도 실패하면 요약에 뭐 때문에 뭐가 안 되는지 같이".
+  - 진짜 오류: `raise_errors=True`로 yfinance가 실제 예외를 던지게 했다. `_short_error`가 `예외종류: 첫 줄 150자`로 줄인다. 지표마다 INFO를 남기고, 이유별로 묶은 한 줄을 `정량 데이터 누락: …` WARNING으로 남긴다(Loki 알림에도 이 문구가 간다). FRED도 같은 방식이다(`fetch_fred_series_latest(raise_errors=True)`).
+  - 정리 메시지: `_quant_failures`(정리마다 비움)에 쌓인 줄을 정리 텍스트 끝 "⚠️ 정량 데이터 누락" 아래에 붙인다. 한 지표만 빠져도 붙는다. 시험(Yahoo 13개 연결 끊김 + FRED 1개 503) 출력은 "Yahoo 시세 13개 중 13개 못 가져옴(30초 뒤 재시도도 실패): 13개 — ConnectionError: …", "FRED 금리 4개 중 1개 못 가져옴: 미국 10년 TIPS 실질금리 — HTTPError: 503 …". 실제 조회는 Yahoo 13개와 FRED 4개 모두 정상이었다.
+  - 자동 깨우기: `feedback.py collect`가 새 피드백을 쌓으면 '처리' 없이 바로 `wake`를 만든다(세션 감시가 켜져 있으면 "처리를 시작합니다"라고 답함). 세션은 깨어날 때만 비용이 든다.
+- push 전 공개 미러 보안 점검(사용자 요청): ① 나갈 변경분(94005d6, 8cef5df의 diff와 커밋 메시지)에는 `.env` 값, 봇 ID, 피드백 방·소유자 ID, 채널 ID가 0건이었다. ② 미러 저장소 전체 파일과 모든 이력에서 `.env` 값, `mirror-deny.txt` 항목, 토큰 모양(Gemini·OpenAI·Anthropic·GitHub·텔레그램 봇 토큰, 개인키)을 찾았다. 걸린 것은 `LLM_PROVIDER=gemini`, `GEMINI_MODEL`(모델 이름)뿐으로 비밀이 아니다. ③ 채팅방 ID 모양 숫자는 예시 `-1001234567890`뿐이다. 뺀 예전 채널, 새 채널, 피드백 방, 로그 방 ID는 미러 이력에 0건이다. `mirror-push.sh` 미리보기도 통과했다.

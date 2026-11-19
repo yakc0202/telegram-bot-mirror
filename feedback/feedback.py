@@ -2,7 +2,7 @@
 """피드백 방 수집·배포 도우미 (LLM을 부르지 않음).
 
 collect  : 10분마다(LaunchAgent) 피드백 방을 읽어 inbox.jsonl에 쌓는다.
-           '처리' → wake 파일을 만들어 Claude 세션을 깨운다.
+           새 피드백이 있거나 '처리'라고 쓰면 wake 파일을 만들어 Claude 세션을 깨운다.
            'push' → report로 올린 커밋이 HEAD와 같으면 push·미러 반영 후 처리한 메시지를 지운다.
 report   : Claude가 고친 뒤 부른다. 바뀐 점을 방에 보내고 push 대기 커밋을 기록한다.
            python3 feedback/feedback.py report <commit> <보고문 파일> <처리한 inbox 메시지 id,...>
@@ -130,6 +130,9 @@ def collect():
     OFFSET.write_text(str(offset))
     if new:
         print(f"{time.strftime('%F %T')} 피드백 {new}건 쌓음")
+        # 새 피드백이 있으면 '처리'를 기다리지 않고 바로 세션을 깨운다
+        if not WAKE.exists():
+            on_wake()
 
 
 def on_wake():

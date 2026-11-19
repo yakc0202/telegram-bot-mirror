@@ -2296,37 +2296,73 @@ FRED_RATE_SERIES = {
 }
 
 
-def _fetch_yfinance_quant(tickers: dict) -> Optional[dict]:
+def _fetch_yfinance_quant(tickers: dict, label: str = "Yahoo 시세") -> Optional[dict]:
     """yfinance로 tickers({지표명: 티커}) 각각의 최신 종가/전일 종가/등락률을 조회해서
     {지표명: {"value", "prev_value", "change_pct"}} 형태로 반환. 개별 티커 조회 실패는
     건너뛰고 계속 진행하며, 전부 실패하면 None을 반환해서(다른 정량 데이터 조회 함수들과
-    동일하게) 정리 기능 전체가 죽지 않도록 함."""
+    동일하게) 정리 기능 전체가 죽지 않도록 함. 못 가져온 지표와 이유는 _quant_failures에 남긴다."""
     try:
         import yfinance as yf
     except ImportError:
         log.warning("yfinance 라이브러리가 설치되어 있지 않아 정량 데이터 조회를 건너뜀 "
                      "(pip install yfinance 필요)")
+        _quant_failures.append(f"{label}: yfinance 라이브러리 없음")
         return None
 
-    result = {}
+    result, errors = _fetch_yfinance_once(yf, tickers)
+    retried = False
+    if not result:
+        # 한 번에 전부 실패하면 대개 일시적인 연결 문제라 잠시 뒤 한 번 더 시도한다
+        log.info(f"yfinance 시세를 하나도 못 가져와 {YFINANCE_RETRY_DELAY}초 뒤 다시 시도")
+        time.sleep(YFINANCE_RETRY_DELAY)
+        result, errors = _fetch_yfinance_once(yf, tickers)
+        retried = True
+    if errors:
+        _record_quant_failure(label, len(tickers), errors, retried and not result)
+    return result or None
+
+
+YFINANCE_RETRY_DELAY = int(os.environ.get("YFINANCE_RETRY_DELAY", "30"))
+
+# 이번 정리에서 못 가져온 정량 데이터와 이유(정리 메시지 끝에 붙임). _run_digest가 조회 전에 비운다.
+_quant_failures: list = []
+
+
+def _short_error(e: Exception) -> str:
+    return f"{type(e).__name__}: {str(e).splitlines()[0][:150] if str(e) else ''}".rstrip(": ")
+
+
+def _record_quant_failure(label: str, total: int, errors: dict, retried_all: bool):
+    """errors: {지표명: 오류 문구}. 같은 이유끼리 묶어서 한 줄로 남기고 WARNING도 찍는다."""
+    by_reason = {}
+    for name, reason in errors.items():
+        by_reason.setdefault(reason, []).append(name)
+    parts = [f"{', '.join(names) if len(names) <= 3 else f'{len(names)}개'} — {reason}"
+             for reason, names in by_reason.items()]
+    line = (f"{label} {total}개 중 {len(errors)}개 못 가져옴"
+            f"{f'({YFINANCE_RETRY_DELAY}초 뒤 재시도도 실패)' if retried_all else ''}: " + "; ".join(parts))
+    _quant_failures.append(line)
+    log.warning(f"정량 데이터 누락: {line}")
+
+
+def _fetch_yfinance_once(yf, tickers: dict) -> tuple:
+    result, errors = {}, {}
     for name, ticker in tickers.items():
         try:
-            hist = yf.Ticker(ticker).history(period="5d")
+            # raise_errors=True: yfinance가 요청 오류를 숨기고 'NoneType' 오류만 남기지 않게 한다
+            hist = yf.Ticker(ticker).history(period="5d", raise_errors=True)
             if len(hist) < 2:
                 log.info(f"{name}({ticker}) 데이터 부족, 건너뜀")
+                errors[name] = "최근 5일 데이터가 2개 미만"
                 continue
             latest = float(hist["Close"].iloc[-1])
             prev = float(hist["Close"].iloc[-2])
             change_pct = (latest - prev) / prev * 100 if prev else 0.0
             result[name] = {"value": latest, "prev_value": prev, "change_pct": change_pct}
         except Exception as e:
-            log.info(f"{name}({ticker}) 시세 조회 실패, 건너뜀: {e}")
-            continue
-
-    if not result:
-        log.warning("정량 시장 데이터를 하나도 못 가져옴 (네트워크 또는 API 문제로 추정)")
-        return None
-    return result
+            errors[name] = _short_error(e)
+            log.info(f"{name}({ticker}) 시세 조회 실패, 건너뜀: {errors[name]}")
+    return result, errors
 
 
 def fetch_market_quant_data() -> Optional[dict]:
@@ -2336,10 +2372,10 @@ def fetch_market_quant_data() -> Optional[dict]:
 
 def fetch_asia_quant_data() -> Optional[dict]:
     """오후 정리 전용 아시아 지수(ASIA_QUANT_TICKERS) 조회."""
-    return _fetch_yfinance_quant(ASIA_QUANT_TICKERS)
+    return _fetch_yfinance_quant(ASIA_QUANT_TICKERS, "Yahoo 아시아 지수")
 
 
-def fetch_fred_series_latest(series_id: str) -> Optional[dict]:
+def fetch_fred_series_latest(series_id: str, raise_errors: bool = False) -> Optional[dict]:
     """FRED의 fredgraph.csv 공개 엔드포인트(API 키 불필요)에서 시계열의 최신 값과 그 직전
     값을 조회. FRED는 휴장일 등 값이 없는 날을 '.'으로 표기하므로 걸러내고 실제 값이 있는
     마지막 두 지점을 비교함. 실패해도 항상 None을 반환해서 정리 기능 전체가 죽지 않도록 함."""
@@ -2360,16 +2396,26 @@ def fetch_fred_series_latest(series_id: str) -> Optional[dict]:
         }
     except Exception as e:
         log.info(f"FRED 시계열({series_id}) 조회 실패, 건너뜀: {e}")
+        if raise_errors:
+            raise
         return None
 
 
 def fetch_rates_quant_data() -> Optional[dict]:
     """FRED_RATE_SERIES에 정의된 금리 시계열(명목/실질/BEI)을 전부 조회."""
-    result = {}
+    result, errors = {}, {}
     for name, series_id in FRED_RATE_SERIES.items():
-        data = fetch_fred_series_latest(series_id)
+        try:
+            data = fetch_fred_series_latest(series_id, raise_errors=True)
+        except Exception as e:
+            errors[name] = _short_error(e)
+            continue
         if data:
             result[name] = data
+        else:
+            errors[name] = "최근 값이 2개 미만"
+    if errors:
+        _record_quant_failure("FRED 금리", len(FRED_RATE_SERIES), errors, False)
     return result or None
 
 
@@ -3769,6 +3815,7 @@ async def main():
         # 정량 데이터 조회 (전부 네트워크 호출이라 스레드로 분리, 실패해도 None 반환되어 정성
         # 데이터만으로 정리가 계속 생성됨). 주식/변동성/환율/에너지는 yfinance, 금리(명목/실질/
         # BEI)는 FRED(API 키 불필요)에서 가져오고, 오후 정리에서만 아시아 지수도 추가 조회함.
+        _quant_failures.clear()
         quant_data = await asyncio.to_thread(fetch_market_quant_data)
         rates_data = await asyncio.to_thread(fetch_rates_quant_data)
         asia_data = await asyncio.to_thread(fetch_asia_quant_data) if digest_time == "evening" else None
@@ -3894,6 +3941,9 @@ async def main():
             else:
                 digest_body_html = html.escape(digest_clean)
             html_text = f"{html.escape(header)}\n\n<blockquote>{digest_body_html}</blockquote>"
+            if _quant_failures:
+                # 숫자 없이 나간 이유를 정리를 받는 쪽에서 바로 알 수 있게 끝에 붙인다
+                html_text += "\n\n⚠️ 정량 데이터 누락\n" + "\n".join(f"- {html.escape(l)}" for l in _quant_failures)
             sent_msg_id = await _send_bot_with_flood_retry(send_bot_message_raw, SUMMARY_CHAT, html_text)
             if sent_msg_id:
                 log.info("정리(텍스트) 전송 완료")
