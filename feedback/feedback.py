@@ -3,7 +3,7 @@
 
 collect  : 10분마다(LaunchAgent) 피드백 방을 읽어 inbox.jsonl에 쌓는다.
            새 피드백이 있거나 '처리'라고 쓰면 worker를 백그라운드로 띄운다.
-           'push'·'진행' → report로 올린 커밋이 HEAD와 같으면 push·미러 반영 후 처리한 메시지를 지운다.
+           'push'·'진행'·'반영' → report로 올린 커밋이 HEAD와 같으면 push·미러 반영 후 처리한 메시지를 지운다.
 worker   : 새 Claude(claude -p)를 띄워 피드백을 고치고 커밋·보고하게 한다. push·미러는 못 하게 막는다.
 report   : Claude가 고친 뒤 부른다. 바뀐 점을 방에 보내고 push 대기 커밋을 기록한다.
            python3 feedback/feedback.py report <commit> <보고문 파일> <처리한 inbox 메시지 id,...>
@@ -52,10 +52,10 @@ WORKER_PROMPT = """피드백 방에 새 피드백이 왔다. AGENTS.md의 '피�
    `/usr/bin/python3 feedback/feedback.py report <커밋> <보고문 파일> <처리한 id,...>`로 보고한다.
    고칠 것이 없으면 `feedback.py note <보고문 파일> [처리한 id,...]`로 이유만 보고한다.
 4. 판단이 필요하거나 고칠 수 없는 피드백은 처리 id에서 빼고 보고문에 이유를 쓴다.
-git push와 mirror-push.sh는 하지 않는다. 배포는 사용자가 방에 'push'나 '진행'이라고 쓰면 수집기가 한다."""
+git push와 mirror-push.sh는 하지 않는다. 배포는 사용자가 방에 'push'·'진행'·'반영' 중 하나를 쓰면 수집기가 한다."""
 
 WAKE_WORDS = {"처리", "처리해", "고쳐"}
-PUSH_WORDS = {"push", "푸시", "배포", "진행", "진행해"}
+PUSH_WORDS = {"push", "푸시", "배포", "진행", "진행해", "반영", "반영해"}
 STATUS_WORDS = {"상태", "status"}
 
 
@@ -207,7 +207,7 @@ def on_status():
     lines = [f"쌓인 피드백 {len(items)}건, {'처리 중' if worker_alive() else '대기'}"]
     if PENDING.exists():
         p = json.loads(PENDING.read_text())
-        lines.append(f"push 대기 커밋 {p['commit'][:7]} ('push'나 '진행'이라고 쓰면 배포)")
+        lines.append(f"push 대기 커밋 {p['commit'][:7]} ('push'·'진행'·'반영'이라고 쓰면 배포)")
     send("\n".join(lines))
 
 
@@ -278,7 +278,7 @@ def report(commit, text_file, handled_csv):
     if PENDING.exists():  # push 전에 다시 고쳤으면 앞서 처리한 피드백도 같이 지운다
         handled = sorted(set(handled) | set(json.loads(PENDING.read_text())["handled"]))
     PENDING.write_text(json.dumps({"commit": commit, "handled": handled}))
-    send(Path(text_file).read_text().strip() + f"\n\n커밋 {commit[:7]}. 배포하려면 'push'나 '진행'이라고 쓰세요.")
+    send(Path(text_file).read_text().strip() + f"\n\n커밋 {commit[:7]}. 배포하려면 'push'·'진행'·'반영' 중 하나를 쓰세요.")
 
 
 def note(text_file, handled_csv=""):

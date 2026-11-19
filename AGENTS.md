@@ -192,7 +192,7 @@ Claude Code·Codex 등 이 저장소에서 작업하는 모든 에이전트에 �
 ### 피드백 방 (`feedback/feedback.py`)
 
 - 사용자가 피드백 그룹(`.env` `FEEDBACK_CHAT`, 로그용 봇이 관리자)에 잘못된 요약을 전달하거나 글을 쓰면, LaunchAgent `dev.yakc0202.telegram-feedback`가 10분마다 `collect`로 `~/.local/state/telegram-bot/feedback/inbox.jsonl`에 쌓는다. LLM은 부르지 않는다.
-- 명령은 `FEEDBACK_OWNER_ID`가 쓴 것만 받는다. 새 피드백이 쌓이거나 '처리'라고 쓰면 `feedback.py worker`를 백그라운드로 띄우고(처리 중이면 겹쳐 띄우지 않음), 'push'·'진행'은 보고한 커밋이 HEAD와 같고 변경이 없을 때만 push와 미러 반영을 한 뒤 처리한 메시지를 지운다. '상태'는 쌓인 건수를 알려 준다.
+- 명령은 `FEEDBACK_OWNER_ID`가 쓴 것만 받는다. 새 피드백이 쌓이거나 '처리'라고 쓰면 `feedback.py worker`를 백그라운드로 띄우고(처리 중이면 겹쳐 띄우지 않음), 'push'·'진행'·'반영'은 보고한 커밋이 HEAD와 같고 변경이 없을 때만 push와 미러 반영을 한 뒤 처리한 메시지를 지운다. '상태'는 쌓인 건수를 알려 준다.
 - worker는 새 `claude -p`(`.env` `CLAUDE_CODE_OAUTH_TOKEN`, `--permission-mode dontAsk`)를 `WORKER_ALLOWED` 도구로만 돌린다. `git push`·`mirror-push.sh`·`git reset`·`rm` 등은 `WORKER_DENIED`로 막는다. 시간 상한 `FEEDBACK_WORKER_TIMEOUT`(기본 1200초), 출력은 `worker.log`, 실패·무보고는 방에 알린다.
 - worker로 돌 때는 `feedback.py status`로 피드백을 읽어 고치고 시험하고 커밋한 뒤 `feedback.py report <커밋> <보고문 파일> <처리한 id,...>`로 방에 보고한다. 고칠 것이 없으면 `feedback.py note <보고문 파일> [처리한 id,...]`. 직접 push하지 않는다.
 - worker에게 도구를 더 주려면 `WORKER_ALLOWED`에 넣고, push·미러·삭제 계열은 넣지 않는다.
