@@ -79,6 +79,11 @@
 
 ## 운영 구조
 
+![봇 구성과 관측 흐름](observability/architecture.png)
+
+번호는 메시지가 처리되는 순서입니다. 파란색은 trace·로그를 모아 SLO와 알람을 만드는 관측 부분입니다
+(같은 맥의 Docker에서 Tempo·Loki 90일 보관, Prometheus·Alertmanager·Grafana).
+
 ```
 운영 맥 ── LaunchDaemon(com.telegram-bot) ── run_bot.sh ── main.py
    ▲

@@ -14,7 +14,7 @@ ingester:
 
 compactor:
   compaction:
-    block_retention: 720h   # trace 30일 보관
+    block_retention: 2160h  # trace 90일 보관
 
 # span으로 RED 지표(호출 수·오류·지연 히스토그램)를 만들어 Prometheus로 보냄. SLO는 이 지표로 계산.
 metrics_generator:

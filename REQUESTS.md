@@ -1093,3 +1093,21 @@
   - 정리 메시지: `_quant_failures`(정리마다 비움)에 쌓인 줄을 정리 텍스트 끝 "⚠️ 정량 데이터 누락" 아래에 붙인다. 한 지표만 빠져도 붙는다. 시험(Yahoo 13개 연결 끊김 + FRED 1개 503) 출력은 "Yahoo 시세 13개 중 13개 못 가져옴(30초 뒤 재시도도 실패): 13개 — ConnectionError: …", "FRED 금리 4개 중 1개 못 가져옴: 미국 10년 TIPS 실질금리 — HTTPError: 503 …". 실제 조회는 Yahoo 13개와 FRED 4개 모두 정상이었다.
   - 자동 깨우기: `feedback.py collect`가 새 피드백을 쌓으면 '처리' 없이 바로 `wake`를 만든다(세션 감시가 켜져 있으면 "처리를 시작합니다"라고 답함). 세션은 깨어날 때만 비용이 든다.
 - push 전 공개 미러 보안 점검(사용자 요청): ① 나갈 변경분(94005d6, 8cef5df의 diff와 커밋 메시지)에는 `.env` 값, 봇 ID, 피드백 방·소유자 ID, 채널 ID가 0건이었다. ② 미러 저장소 전체 파일과 모든 이력에서 `.env` 값, `mirror-deny.txt` 항목, 토큰 모양(Gemini·OpenAI·Anthropic·GitHub·텔레그램 봇 토큰, 개인키)을 찾았다. 걸린 것은 `LLM_PROVIDER=gemini`, `GEMINI_MODEL`(모델 이름)뿐으로 비밀이 아니다. ③ 채팅방 ID 모양 숫자는 예시 `-1001234567890`뿐이다. 뺀 예전 채널, 새 채널, 피드백 방, 로그 방 ID는 미러 이력에 0건이다. `mirror-push.sh` 미리보기도 통과했다.
+
+### 2026-11-19 Tempo trace 보관 기간 30일 → 90일 (다른 세션 요청)
+- 상태: 완료 (커밋은 피드백 방 'push' 때 같이 올라감, Tempo에는 이미 적용)
+- 처리: `observability/tempo.yaml` `compactor.compaction.block_retention`을 `720h`에서 `2160h`로 바꿨다. `docker compose up -d --force-recreate tempo`로 다시 띄웠다(설정 파일이 바인드 마운트라 sed로 바꾸면 restart만으로는 옛 파일이 보일 수 있어 재생성). `/status/config`에서 compactor `block_retention: 2160h0m0s`를 확인했고, 재기동 뒤 trace 검색도 정상이다. Loki·Prometheus는 원래 90일이다.
+- 용량: 11/14~11/19(약 4.5일) 블록이 20.8MB(+generator 5.7MB)라 하루 약 4.6MB다. 90일이면 블록 약 0.4GB로 본다. colima 디스크는 30GB 중 3.1GB 사용이라 여유가 있다.
+- 그림: `~/Documents/linkedin/telegram-bot-architecture/telegram-bot-observability-portfolio-style.html`의 Tempo 설명을 "trace 90일"로 고치고, 같은 방식(Chrome headless, 배율 1.5, 2076×1500)으로 PNG를 다시 그려 덮어썼다. 포트폴리오 원본은 건드리지 않았다.
+
+### 2026-11-19 피드백 처리를 세션 감시 대신 수집기가 새 Claude를 띄워 하게
+- 상태: 진행중 (구현·시험 완료, 실제 피드백으로 첫 처리는 아직, push 확인 대기)
+- 요청: "감시를 수집기처럼 돌리되 내용이 있으면 새 세션을 열면?" → "응 그 방식으로 만들어줘". 이유: 긴 세션이 깨어나면 대화 전체를 다시 읽어 토큰이 많이 들고, 세션을 열어 둬야 한다.
+- 처리: `feedback/feedback.py`
+  - `collect`가 새 피드백(또는 '처리')을 보면 `feedback.py worker`를 새 세션(`start_new_session`)으로 띄운다. `worker.pid`로 겹침을 막는다. `wake`·`watcher.pid`는 없앴다.
+  - `worker`: `claude -p`를 `--permission-mode dontAsk`와 `WORKER_ALLOWED`(Read·Edit·Write·Glob·Grep, python3, git status/diff/log/show/add/commit 등)로 돌리고 `WORKER_DENIED`(git push, mirror-push.sh, git reset/checkout, rm, sudo, launchctl)로 막는다. `.env` `CLAUDE_CODE_OAUTH_TOKEN`으로 로그인. 상한 `FEEDBACK_WORKER_TIMEOUT`(기본 1200초). 출력은 `~/.local/state/telegram-bot/feedback/worker.log`. 실패·시간 초과·보고 없이 끝남은 방에 알린다.
+  - `note <보고문> [id,...]`: 고칠 것이 없을 때 보고문만 보내고 처리한 피드백만 지운다(보고 메시지는 남김). `report`는 push 전에 다시 고치면 앞서 처리한 id도 합친다.
+  - LaunchAgent plist에 `AbandonProcessGroup`을 넣어 수집기가 끝나도 worker가 죽지 않게 했다(다시 로드함). 세션 감시 셸은 껐다.
+- 시험: LaunchAgent와 같은 환경으로 `claude -p` 권한 시험 — 로그인 정상, `git status` 실행, `git push --dry-run`과 `./mirror-push.sh`는 거부됨. 가짜 claude로 worker 세 경우(보고 없이 정상 종료, 종료 코드 3, 시간 초과)에서 방 알림 문구와 `worker.pid` 정리를 확인했다.
+- 알아둘 점: python3 실행을 허용하므로 worker가 마음먹으면 파이썬으로 우회할 수 있다. 그래도 배포는 사용자가 방에 'push'라고 써야 하고, 수집기가 보고한 커밋과 HEAD가 같을 때만 한다. 정리 작성과 같은 구독 한도를 나눠 쓴다.
+- 다음: 첫 실제 피드백 때 `worker.log`와 방 보고가 제대로 오는지 본다.
