@@ -1111,3 +1111,35 @@
 - 시험: LaunchAgent와 같은 환경으로 `claude -p` 권한 시험 — 로그인 정상, `git status` 실행, `git push --dry-run`과 `./mirror-push.sh`는 거부됨. 가짜 claude로 worker 세 경우(보고 없이 정상 종료, 종료 코드 3, 시간 초과)에서 방 알림 문구와 `worker.pid` 정리를 확인했다.
 - 알아둘 점: python3 실행을 허용하므로 worker가 마음먹으면 파이썬으로 우회할 수 있다. 그래도 배포는 사용자가 방에 'push'라고 써야 하고, 수집기가 보고한 커밋과 HEAD가 같을 때만 한다. 정리 작성과 같은 구독 한도를 나눠 쓴다.
 - 다음: 첫 실제 피드백 때 `worker.log`와 방 보고가 제대로 오는지 본다.
+
+### 2026-11-19 맥에서 봇이 쓰는 CPU·메모리, colima VM 메모리 3GB → 2GB
+- 상태: 완료
+- 측정: 봇 본체(`main.py`)는 평균 CPU 약 0.3%(1코어 기준), 메모리 약 94MB(최고 128MB). 관측 colima VM은 평균 CPU 약 9%(4.5일 누적 607분), 맥 메모리 약 3.0GB(할당량 전부). 컨테이너 실사용은 합계 약 0.7GB(Tempo 231, Alloy 132, Grafana 108, Prometheus 104, Loki 85, Alertmanager 20MB). cloudflared 약 0.6%·18MB.
+- 로그 수집기 대안 검토(사용자 질문 "alertmanager가 있는데 alloy가 있는 이유" → "promtail 쓰면 안돼?" → "fluent bit은?"):
+  - Alloy와 Alertmanager는 역할이 다르다. Alloy는 로그 파일을 Loki로 옮기고, Alertmanager는 Loki·Prometheus 규칙이 낸 경고를 묶어 보낸다.
+  - Promtail: 하는 일은 같고 더 가볍지만(약 30~50MB) 2026-03-02에 지원이 끝나 제외.
+  - Fluent Bit: CNCF 프로젝트로 관리되고 가볍다(약 10~30MB, Alloy 132MB 대비 약 100MB 절약). 옮기려면 multiline(Traceback 묶기), KST 시각 파싱(틀리면 9시간 어긋남), `level` 라벨, `LogPipelineDown`(up{job="alloy"})·대시보드를 바꿔야 한다.
+  - 결정(사용자): 수집기는 Alloy 유지. 절약 폭이 큰 colima VM 메모리 축소(약 1GB)를 택했다.
+- 처리: `~/.colima/default/colima.yaml`의 `memory`를 3에서 2로 바꾸고 `colima stop`·`colima start`. 컨테이너 6개 모두 다시 떴고 Tempo·Loki·Prometheus·Alertmanager·Grafana ready 200, Prometheus `up` 5개 모두 1, grafana.miori.store는 Access(302). VM 맥 메모리 약 2.0GB, VM 안 used 566MB·available 1.39GB.
+- 다음: Tempo·Loki가 90일 치를 다루며 메모리가 늘면 OOM 재시작이 나는지 `docker compose ps`의 재시작 횟수로 본다.
+
+### 2026-11-19 피드백 방: 동영상이 파일로 옴, 채널 홍보 글이 잡담으로 안 걸러짐
+- 상태: 완료 (커밋은 피드백 방 'push' 때 배포)
+- 요청(피드백 9·10): "[재야의 고수들]"(@<비공개>) 캡션 없는 영상이 요약 채널에 영상이 아니라 파일로 옴.
+  - 원인: `send_media_to_summary_chat`이 사진이 아니면 모두 `sendDocument`로 올렸다(이름 없는 영상은 "file"). 로그상 12:46 다운로드 32초 뒤 전송 완료라 큰 미디어(영상)로 본다. 원본 미디어 종류는 봇 세션을 같이 쓰게 돼 직접 조회하지 않았다.
+  - 처리: `_bot_media_upload_kind()` 추가. 동영상(동그란 영상 포함)은 `sendVideo`(가로·세로·길이, `supports_streaming`), GIF는 `sendAnimation`, 나머지는 그대로 `sendDocument`. 앨범 경로는 원래 video 타입으로 보내고 있었다.
+- 요청(피드백 11·12): "제가 유튭 채널을 만들었습니다 … 구독 한번씩만"(@<비공개>) 글이 잡담으로 안 걸리고 드러켄밀러 기사와 🔁 동일내용으로 나감.
+  - 원인: 링크 미리보기(드러켄밀러 영상 설명)를 본문에 붙인 뒤 판단해서, 잡담 판단이 요약 단계로 미뤄졌고(`MERGED_LLM_CHECKS`) 그 전에 중복 판단이 기사와 같다고 봤다. 실제 Gemini 시험: 미리보기 포함 STOCK, 본문만 CHITCHAT.
+  - 처리: `SELF_PROMO_RE`(구독 한번/부탁/해주/좀/눌러, 채널을 만들었/개설했/열었) 추가. 미리보기 붙이기 전 본문(`own_text`)에 이 문구가 있으면 잡담 판단을 미루지 않고 본문만으로 LLM에 묻는다(자동 잡담 처리 아님 — 정보 글 끝의 구독 안내는 LLM이 STOCK으로 본다). '구독형', '구독자', '구독 사업'은 안 걸린다. 저장된 메시지 228건 중 걸린 것 0건.
+- 시험: `py_compile`, 실제 중복 로그 원문으로 정규식·잡담 판단(Gemini) 확인, 업로드 방식은 Telethon 속성으로 만든 가짜 메시지로 확인. 실제 영상 업로드는 배포 후 다음 영상 글에서 확인한다.
+- 후속 요청(피드백 15·16): "채널 개설 문구가 (구) 에테르 채널처럼 공지문인데 잡담처럼 되면 어떻게 해", "좀 더 확실한 기준으로 다시해".
+  - 위험: 위 `SELF_PROMO_RE`는 '채널을 만들었/개설했/열었'만으로도 걸려, 텔레그램 채널 개설·이전 공지가 본문만으로 LLM에 가고 잡담 기준의 '채널 홍보 → CHITCHAT'에 걸릴 수 있었다.
+  - 처리: `SELF_PROMO_RE`를 없애고 `is_youtube_subscribe_promo()`로 바꿨다. 유튜브 링크(`YOUTUBE_URL_RE`)와 구독 요청 문구(`SUBSCRIBE_REQUEST_RE`)가 둘 다 있고, 텔레그램 링크(t.me)·'공지'·'이전'·'이사'·'옮기' 표시(`CHANNEL_NOTICE_RE`)가 없을 때만 본문만으로 판단한다. 그 밖의 글은 이번 수정 전과 같은 경로다. 잡담 기준(`STOCK_CATEGORY_CRITERIA`)에 "텔레그램 채널 개설·이전 운영 공지는 STOCK, 유튜브 등 구독 부탁만 있는 홍보는 CHITCHAT, 정보 글 끝의 구독 안내는 정보 내용으로 판단" 한 줄을 넣었다.
+  - 시험: 저장 글 289건(messages+duplicate_log) 중 걸린 것은 원래 사례 1건. Gemini 판정(1회): 원래 사례 CHITCHAT, 텔레그램 새 채널 공지(구독 부탁 포함/없음) STOCK, 채널 이전+유튜브 STOCK, 정보 글 끝 유튜브 구독 안내 STOCK. 처음 문구("구독·좋아요를 부탁하는 홍보는 CHITCHAT")로는 정보 글 끝 구독 안내가 CHITCHAT으로 나와 문구를 좁혔다. 실제 '(구)에테르' 공지 원문은 저장돼 있지 않아 비슷하게 만든 글로 시험했다.
+  - 함께 고친 것: `feedback.py report`가 받은 커밋을 그대로 `pending.json`에 적어, 짧은 해시를 주면 방의 'push'가 HEAD(전체 해시)와 달라 멈췄다. `report()`가 `git rev-parse`로 전체 해시를 풀어 저장한다. 이번 대기 기록은 손으로 전체 해시로 고쳤다.
+
+### 2026-11-19 피드백 방: 'push' 말고 '진행'으로도 배포되게 (피드백 19)
+- 상태: 완료 (커밋은 피드백 방 'push'·'진행' 때 배포)
+- 처리: `feedback/feedback.py`의 `PUSH_WORDS`에 '진행'·'진행해'를 추가(대소문자·앞뒤 공백 무시, '진행중' 같은 다른 글은 피드백으로 쌓임). 보고·상태 안내 문구, worker 프롬프트, 모듈 설명, `AGENTS.md` 피드백 방 규칙에도 '진행'을 적었다.
+- 시험: `py_compile` 통과. '진행'·' 진행 '·'진행해'·'PUSH'는 push 명령, '진행중'은 아님을 확인.
+- 알아둘 점: `feedback/`는 `~/telegram-bot`에서 바로 쓰므로 수집기는 다음 수집부터 '진행'을 알아듣는다. 앞선 push 대기(피드백 9·10·11·12·15·16)와 이 커밋은 방에 'push'나 '진행' 한 번으로 같이 배포된다.

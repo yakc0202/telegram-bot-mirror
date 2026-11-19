@@ -3,7 +3,7 @@
 
 collect  : 10분마다(LaunchAgent) 피드백 방을 읽어 inbox.jsonl에 쌓는다.
            새 피드백이 있거나 '처리'라고 쓰면 worker를 백그라운드로 띄운다.
-           'push' → report로 올린 커밋이 HEAD와 같으면 push·미러 반영 후 처리한 메시지를 지운다.
+           'push'·'진행' → report로 올린 커밋이 HEAD와 같으면 push·미러 반영 후 처리한 메시지를 지운다.
 worker   : 새 Claude(claude -p)를 띄워 피드백을 고치고 커밋·보고하게 한다. push·미러는 못 하게 막는다.
 report   : Claude가 고친 뒤 부른다. 바뀐 점을 방에 보내고 push 대기 커밋을 기록한다.
            python3 feedback/feedback.py report <commit> <보고문 파일> <처리한 inbox 메시지 id,...>
@@ -47,15 +47,15 @@ WORKER_DENIED = ["Bash(git push:*)", "Bash(./mirror-push.sh:*)", "Bash(git reset
                  "Bash(git checkout:*)", "Bash(rm:*)", "Bash(sudo:*)", "Bash(launchctl:*)"]
 WORKER_PROMPT = """피드백 방에 새 피드백이 왔다. AGENTS.md의 '피드백 방' 규칙대로 처리하라.
 1. SYNC.md를 읽고 `/usr/bin/python3 feedback/feedback.py status`로 쌓인 피드백을 본다.
-2. 고칠 수 있는 것은 고치고 py_compile과 실제 데이터로 시험한 뒤 REQUESTS.md에 기록하고 커밋한다.
-3. 바뀐 점을 사용자가 읽을 한국어 보고문으로 파일에 쓰고
+2. 고칠 수 있는 것은 고치고 py_compile과 실제 데이터로 시험한 뒤 REQUESTS.md·SYNC.md까지 고치고 모두 커밋한다.
+3. report·note는 마지막 단계다. 그 뒤로 파일을 고치지 않는다(커밋 안 된 변경이 있으면 방의 push가 막힌다). 바뀐 점을 사용자가 읽을 한국어 보고문으로 파일에 쓰고
    `/usr/bin/python3 feedback/feedback.py report <커밋> <보고문 파일> <처리한 id,...>`로 보고한다.
    고칠 것이 없으면 `feedback.py note <보고문 파일> [처리한 id,...]`로 이유만 보고한다.
 4. 판단이 필요하거나 고칠 수 없는 피드백은 처리 id에서 빼고 보고문에 이유를 쓴다.
-git push와 mirror-push.sh는 하지 않는다. 배포는 사용자가 방에 'push'라고 쓰면 수집기가 한다."""
+git push와 mirror-push.sh는 하지 않는다. 배포는 사용자가 방에 'push'나 '진행'이라고 쓰면 수집기가 한다."""
 
 WAKE_WORDS = {"처리", "처리해", "고쳐"}
-PUSH_WORDS = {"push", "푸시", "배포"}
+PUSH_WORDS = {"push", "푸시", "배포", "진행", "진행해"}
 STATUS_WORDS = {"상태", "status"}
 
 
@@ -198,6 +198,8 @@ def worker():
         send(f"피드백 처리 실패({failed}). 맥의 {WORKER_LOG}를 확인해 주세요.")
     elif after == before:
         send(f"피드백 처리가 보고 없이 끝났습니다. 맥의 {WORKER_LOG}를 확인해 주세요.")
+    elif run("git", "status", "--porcelain", "--untracked-files=no")[1]:
+        send("처리 뒤 커밋 안 된 변경이 남아 지금은 push가 막힙니다. Claude 세션에서 확인해 주세요.")
 
 
 def on_status():
@@ -205,7 +207,7 @@ def on_status():
     lines = [f"쌓인 피드백 {len(items)}건, {'처리 중' if worker_alive() else '대기'}"]
     if PENDING.exists():
         p = json.loads(PENDING.read_text())
-        lines.append(f"push 대기 커밋 {p['commit'][:7]} ('push'라고 쓰면 배포)")
+        lines.append(f"push 대기 커밋 {p['commit'][:7]} ('push'나 '진행'이라고 쓰면 배포)")
     send("\n".join(lines))
 
 
@@ -265,10 +267,18 @@ def cleanup(handled, extras=True):
 
 def report(commit, text_file, handled_csv):
     handled = [int(x) for x in handled_csv.split(",") if x.strip()]
+    code, full = run("git", "rev-parse", "--verify", f"{commit}^{{commit}}")
+    if code:
+        sys.exit(f"커밋을 찾지 못함: {commit}")
+    commit = full  # on_push가 HEAD 전체 해시와 비교하므로 짧은 해시를 풀어 둔다
+    _, dirty = run("git", "status", "--porcelain", "--untracked-files=no")
+    _, head = run("git", "rev-parse", "HEAD")
+    if dirty or head != commit:  # 이대로면 방의 push가 막히므로 보고하지 않고 먼저 커밋하게 한다
+        sys.exit(f"보고 안 함: 커밋 안 된 변경이 있거나 HEAD({head[:7]})가 {commit[:7]}와 다름. 모두 커밋하고 HEAD로 다시 report.")
     if PENDING.exists():  # push 전에 다시 고쳤으면 앞서 처리한 피드백도 같이 지운다
         handled = sorted(set(handled) | set(json.loads(PENDING.read_text())["handled"]))
     PENDING.write_text(json.dumps({"commit": commit, "handled": handled}))
-    send(Path(text_file).read_text().strip() + f"\n\n커밋 {commit[:7]}. 배포하려면 'push'라고 쓰세요.")
+    send(Path(text_file).read_text().strip() + f"\n\n커밋 {commit[:7]}. 배포하려면 'push'나 '진행'이라고 쓰세요.")
 
 
 def note(text_file, handled_csv=""):

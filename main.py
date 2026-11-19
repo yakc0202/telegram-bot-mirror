@@ -54,7 +54,9 @@ from pathlib import Path
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon import utils as telethon_utils
-from telethon.tl.types import MessageMediaWebPage, WebPage, MessageMediaPoll, MessageMediaPhoto
+from telethon.tl.types import (
+    MessageMediaWebPage, WebPage, MessageMediaPoll, MessageMediaPhoto, DocumentAttributeVideo,
+)
 from anthropic import Anthropic
 import requests
 from requests.adapters import HTTPAdapter
@@ -1143,6 +1145,24 @@ NEWS_ARTICLE_SIGNALS = [
 
 TICKER_HASHTAG_RE = re.compile(r"[#$][A-Za-z]{1,5}\b")
 
+# 구독 요청 문구('구독 한번씩만', '구독좀'). '구독형', '구독자'처럼 기사에 나오는 말은 걸리지 않게
+# 요청하는 말꼴만 본다.
+SUBSCRIBE_REQUEST_RE = re.compile(r"구독\s*(한\s*번|부탁|해\s*주|좀|눌러|과\s*좋아요)")
+YOUTUBE_URL_RE = re.compile(r"(youtube\.com|youtu\.be)/", re.IGNORECASE)
+# 텔레그램 채널 개설·이전 공지는 홍보가 아니라 공지로 본다(아래 조건에서 빼서 원래대로 판단).
+CHANNEL_NOTICE_RE = re.compile(r"t\.me/|telegram\.me/|공지|이전|이사|옮기|옮겼|옮깁", re.IGNORECASE)
+
+
+def is_youtube_subscribe_promo(own_text: str) -> bool:
+    """링크 미리보기를 붙이기 전 본문이 유튜브 구독 요청 홍보인지.
+    유튜브 링크와 구독 요청 문구가 둘 다 있고, 텔레그램 링크·공지·이전 표시가 없을 때만 참이다.
+    참이면 미리보기를 빼고 본문만으로 잡담 판단을 받는다(자동 잡담 처리는 아님)."""
+    return bool(
+        YOUTUBE_URL_RE.search(own_text)
+        and SUBSCRIBE_REQUEST_RE.search(own_text)
+        and not CHANNEL_NOTICE_RE.search(own_text)
+    )
+
 
 KEYWORD_FALSE_POSITIVE_COMPOUNDS = [
     "반대매매",  # '매매' 키워드가 이 단어 안에 우연히 포함돼서, 진짜 매매 정보가 아닌
@@ -1217,6 +1237,9 @@ STOCK_CATEGORY_CRITERIA = (
     "종목, 매매 방향, 가격/차트, 시황 뿐 아니라 금리, 관세, 전쟁, 정상회담, 선거처럼 "
     "주가나 시장에 영향을 줄 수 있는 정치/거시경제 뉴스도 STOCK으로 간주해줘.\n"
     "인사말, 감사 인사, 채널 홍보, 순수 잡담, 농담처럼 시장과 무관한 대화는 CHITCHAT이야.\n"
+    "단, 텔레그램 채널을 새로 열거나 옮긴다는 운영 공지(새 채널 주소·이전 안내)는 구독자가 놓치면 "
+    "안 되므로 STOCK이야. 유튜브 등 다른 곳의 구독·좋아요 부탁만 있는 홍보는 CHITCHAT이지만, "
+    "종목·수치·시황 정보가 있는 글 끝에 구독 안내가 붙은 것이면 정보 내용으로 판단해.\n"
     "중요: 시장 관련 단어(베어마켓, 급등, 폭락 등)를 언급하더라도, 그 자체로 새로운 정보나 "
     "분석을 전달하지 않고 다른 메시지에 대한 짧은 반응/감상/맞장구만 담은 경우도 CHITCHAT으로 "
     "판단해. 예: '대놓고 베어마켓이라고 쓰는구나', 'ㄹㅇㅋㅋ 이러다 진짜 되겠는데' 같은 문장은 "
@@ -3100,6 +3123,23 @@ def is_duplicate(text: str, source_label: str = "", source_link: str = "") -> Op
     return None
 
 
+def _bot_media_upload_kind(message) -> tuple:
+    """사진이 아닌 미디어를 봇 API로 올릴 방법(메서드, 파일 필드, 파일 이름, 추가 값).
+    sendDocument로 올리면 동영상도 '파일'로만 보여서 동영상·GIF는 전용 메서드로 보낸다."""
+    filename = getattr(getattr(message, "file", None), "name", None)
+    if getattr(message, "gif", None):
+        return "sendAnimation", "animation", filename or "animation.mp4", {}
+    video = getattr(message, "video", None)
+    if video:
+        extra = {"supports_streaming": "true"}
+        for attr in getattr(video, "attributes", []) or []:
+            if isinstance(attr, DocumentAttributeVideo):
+                extra.update(width=attr.w, height=attr.h, duration=int(attr.duration or 0))
+                break
+        return "sendVideo", "video", filename or "video.mp4", extra
+    return "sendDocument", "document", filename or "file", {}
+
+
 @_traced_send
 async def send_media_to_summary_chat(
     client, message, caption: str, summary_entity=None, source_label: str = "출처 미상"
@@ -3139,11 +3179,11 @@ async def send_media_to_summary_chat(
                         timeout=30,
                     )
                 else:
-                    filename = getattr(getattr(message, "file", None), "name", None) or "file"
+                    method, field, filename, extra = _bot_media_upload_kind(message)
                     resp = await _post_in_thread(
-                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
-                        data={"chat_id": DIGEST_CHAT, "caption": styled_caption, "parse_mode": "HTML"},
-                        files={"document": (filename, f)},
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
+                        data={"chat_id": DIGEST_CHAT, "caption": styled_caption, "parse_mode": "HTML", **extra},
+                        files={field: (filename, f)},
                         timeout=60,
                     )
             if resp.status_code == 200:
@@ -4289,6 +4329,7 @@ async def main():
 
         # 메시지가 링크 하나뿐이면 텔레그램이 자동으로 미리보기 카드(제목/설명)를 만들어주는데,
         # 우리는 그 정보를 안 가져오면 URL 문자열만 보고 요약해야 해서 부실해짐 → 보강해줌
+        own_text = text  # 링크 미리보기를 붙이기 전 본문(채널 홍보 판단용)
         webpage_preview = extract_webpage_preview(event.message)
         if webpage_preview and (webpage_preview.get("title") or webpage_preview.get("description")):
             extra_lines = []
@@ -4329,14 +4370,21 @@ async def main():
         # 판단을 요약 호출에 합쳐서 한 번에 받음(잡담 판단 호출을 따로 하지 않음).
         category_deferred = False
         if CHITCHAT_FILTER_ENABLED and text.strip() and not is_html_source:
-            heuristic = looks_stock_related_heuristic(text, extract_urls(text))
-            if heuristic is None and MERGED_LLM_CHECKS and SUMMARIZE_ENABLED and uses_general_summary(text):
+            # 유튜브 구독 요청 글은 미리보기(링크된 영상 내용)를 빼고 본문만으로 판단하고,
+            # 중복 판단보다 먼저 판단한다(미리보기 내용 때문에 정보 글이나 중복으로 보이지 않게).
+            self_promo = is_youtube_subscribe_promo(own_text)
+            classify_text = own_text if self_promo else text
+            heuristic = looks_stock_related_heuristic(classify_text, extract_urls(classify_text))
+            if (heuristic is None and not self_promo and MERGED_LLM_CHECKS and SUMMARIZE_ENABLED
+                    and uses_general_summary(text)):
                 category_deferred = True
                 category = "STOCK"
             else:
                 try:
                     async with _llm_stage("classify"):
-                        category = await asyncio.to_thread(classify_is_stock_related, text, extract_urls(text))
+                        category = await asyncio.to_thread(
+                            classify_is_stock_related, classify_text, extract_urls(classify_text)
+                        )
                 except Exception as e:
                     log.error(f"잡담 판단 중 오류, 안전하게 통과시킴: {e}")
                     category = "STOCK"
