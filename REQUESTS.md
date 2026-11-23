@@ -1176,3 +1176,22 @@
 - 처리: `_call_cli`가 `subprocess.TimeoutExpired`를 잡아 그때까지 나온 stderr·stdout 끝부분(MCP 경고 줄 제외)을 "N초 시간 초과, 마지막 출력: …"으로 남긴다. 출력 정리는 `_cli_output_tail()`로 빼서 오류 종료와 같이 쓴다. 다음에 또 시간 초과가 나면 이 로그로 어디서 멈췄는지 본다.
 - 시험: `py_compile` 통과. 가짜 codex(진행 출력 후 멈춤, 시간 한도 2초) → "2초 시간 초과, 마지막 출력: model: gpt-x / thinking..."(MCP 줄 빠짐), 오류 종료 가짜 codex → "exit 1: real error here".
 - 알아둘 점: 시간 한도(420초)는 늘리지 않았다. 늘리면 정리 발송이 그만큼 늦어지고 Gemini 폴백이 정상 동작했기 때문. 자주 반복되면 그때 한도나 순서를 다시 본다.
+
+### 2026-11-23 Grafana 포트폴리오 방문기록에서 예전에 물어본 곳(/.git 등 스캐너 경로) 제거
+- 상태: 완료(삭제는 모두 롤백, IP 저장 추가)
+- 확인: 11/18에 물어본 `/.git/HEAD`, `/.git/config` 같은 스캐너 경로는 모두 404다. "포트폴리오 조회" 대시보드 7개 패널이 전부 `bot = 0 AND status = 200`만 센다(faf2418). 실행 중인 Grafana API로도 7개 패널 모두 이 조건이 들어간 것을 확인했다. `views.db`에서 이 조건으로 남는 스캐너 경로는 0건이다(마지막 스캐너 기록 11/19).
+- 후속 "데이터에서 없애기": 로컬 `views.db`에서 점(.)으로 시작하는 경로·`.git`·`.env`·`.ssh` 경로 중 404인 행 22건을 지웠다(백업 `views.db.bak-20261123123305`, 같은 폴더). 남은 행 1137건, 최대 id 1159는 그대로라 동기화(`max(id)` 이후만 복사)가 다시 채우지 않는다. Cloudflare D1 원본에는 남아 있다.
+- 정정 "404 말고 SK Broadband로 찍히던 내 다른 맥북을 기록에서 없애달라": 사용자가 말한 곳은 스캐너가 아니라 본인의 다른 맥북(네트워크 SK Broadband)이었다. 로컬 `views.db`에서 SK Broadband 행 853건을 지웠다(맥 Chrome 사람 판정 107건, curl·HeadlessChrome 봇 판정 746건, 11/11~11/21). 백업 `views.db.bak-20261123123501`. 남은 행 284건(사람·200은 248건), 최대 id 1159는 그대로라 동기화가 다시 채우지 않는다. D1 원본에는 남아 있고, 그 맥북으로 앞으로 열면 다시 기록된다.
+- 질문 "내 맥북이라는 근거는? IP 보고 거른 거야?": 아니다. 기록에 IP 칸이 없어 네트워크 이름(SK Broadband)만으로 지웠다. 사용자 말을 그대로 믿은 것이고 기기 확인은 못 했다.
+- 후속 "삭제 전체 롤백하고 IP도 저장되게": 
+  - 롤백: 첫 백업(`views.db.bak-20261123123305`)의 행을 `INSERT OR IGNORE`로 다시 넣었다(875건). 행 수 1159로 삭제 전과 같다. 롤백 직전 상태는 `views.db.before-rollback-*`로 남겼다.
+  - 사이트(portfolio-site `b8c1049`, main push → Cloudflare Pages 자동 배포): D1 마이그레이션 `0002_views_ip.sql`(`ALTER TABLE views ADD COLUMN ip TEXT`)을 원격에 먼저 적용하고, `functions/_middleware.js`가 `cf-connecting-ip` 헤더를 `ip`에 넣는다. README의 "IP는 남기지 않는다"도 고쳤다.
+  - `observability/portfolio_views_sync.py`: `COLS`에 `ip`를 넣고, 로컬 표에 없는 칸은 `ALTER TABLE`로 추가, INSERT에 칸 이름을 적는다.
+  - 대시보드 "최근 조회 50건"에 IP 칸을 넣었다.
+  - 확인: 배포 뒤 시험 요청 1건(curl, `bot = 1`이라 조회 수에는 안 들어감, id 1161)이 D1과 로컬에 IP와 함께 들어왔다. 이 시험 요청의 네트워크가 SK Broadband였으므로 이 맥도 SK Broadband를 쓴다. 이전 기록(id 1160까지)은 IP가 비어 있다.
+  - 알아둘 점: IP는 개인정보라 Grafana(Access로 막음)와 저장소 밖 `views.db`에만 둔다. 내 기기는 `?me=1`로 한 번 열면 쿠키로 세지 않는 기능이 이미 있다.
+
+### 2026-11-23 "사이트별 하루 조회"에서 12:38 방문이 0시에 찍히는 이유
+- 상태: 완료
+- 원인: 이 패널은 하루 단위로 묶어 KST 그날 0시 시각에 한 점을 찍는다(`date(ts, '+9 hours')`). 대시보드 기간을 24시간으로 줄이면 그날 묶음이 0시 막대로만 보인다. 실제 시각은 "최근 조회 50건" 표에 있다.
+- 처리: 패널에 `timeFrom: 30d`를 넣어 대시보드 기간과 관계없이 최근 30일을 하루 막대로 보이게 했다. Grafana API로 반영 확인.
