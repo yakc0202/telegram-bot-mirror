@@ -1158,3 +1158,21 @@
 - 처리: `feedback/feedback.py`의 `PUSH_WORDS`에 '반영'·'반영해'를 추가했다. 보고·상태 안내 문구, worker 프롬프트, 모듈 설명, `AGENTS.md` 피드백 방 규칙에도 '반영'을 적었다.
 - 시험: `py_compile` 통과. '반영'·' 반영 '·'반영해'·'진행'·'PUSH'는 push 명령, '반영됨'·'반영해줘'는 아님(피드백으로 쌓임)을 확인.
 - 알아둘 점: 수집기는 `~/telegram-bot/feedback/`를 바로 쓰므로 다음 수집부터 '반영'을 알아듣는다. 앞선 push 대기(피드백 25~28, e4a22b9)와 이 커밋은 방에 한 번 쓰면 같이 배포된다.
+
+### 2026-11-23 피드백 방: 정리 "claude CLI 실패" 경고와 Gemini MAX_TOKENS 경고 원인 (피드백 36·37·40·41·44·45)
+- 상태: 완료 (코드 수정은 피드백 방 'push'·'진행'·'반영' 때 배포). Claude 계정 쪽은 사용자 확인 필요.
+- 요청: WARNING 알림 두 건을 전달하며 "이건 뭐야", "왜?", "뭐가 실패한거야?", "이거 왜 발생했어?".
+- 진단 1 (claude CLI): 08시/18시 정리는 `claude -p` → `codex exec` → Gemini 순으로 시도한다. 로그상 11/21 18:00부터 `claude -p`가 "Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access"로 실패(11/21 18:00, 11/22 18:00, 11/23 08:00). 11/22 08:00은 끝줄이 MCP 경고(`[mcp-sdk] SEP-2352 …`)라 실제 오류가 가려졌다. `.env`의 `CLAUDE_CODE_OAUTH_TOKEN`이 묶인 계정(조직)에서 Claude Code 구독 사용을 막은 것으로, 코드 문제가 아니다. 정리는 매번 codex로 나갔고, 11/22 18:00은 codex도 420초 시간 초과라 Gemini로 나갔다. 피드백 worker도 같은 토큰을 쓰는데 11/23 12시 무렵 정상 실행돼, 제한이 풀렸거나 간헐적일 수 있다 — 다음 정리 회차 로그로 확인.
+  - 처리: `_call_cli`가 실패 메시지를 만들 때 stderr·stdout을 함께 보고 `[mcp`로 시작하는 줄을 빼서 실제 오류가 남게 했다.
+  - 사용자 할 일: 계속 실패하면 claude.ai에서 토큰 계정의 조직 설정(Claude Code 구독 사용 허용)을 확인하거나, 개인 계정으로 `claude setup-token`을 다시 해 `.env` 토큰을 바꾼다. Claude를 쓰지 않을 거면 `.env`에 `DIGEST_CLI_PROVIDERS=codex`로 경고를 없앤다.
+- 진단 2 (Gemini MAX_TOKENS): 11/23 11:37 중복 확인(`ask_llm_same_info`, '[속보] 코스피 5%대 급락…매도 사이드카 발동' vs '코스피 매도 사이드카 발동'). 답 한도가 10토큰인데 Gemini가 가끔 SAME/DIFFERENT 대신 설명부터 써서 잘린다. 실제 메시지로 재현(3회 중 1회 "제시된 두 메시지를"로 잘림). 잘린 답은 SAME으로 시작하지 않아 '다른 정보'로 처리됐다. 이 건은 잘리지 않은 판단도 DIFFERENT(5회 모두)라 결과는 같았다.
+  - 처리: 한도를 32토큰으로 늘리고, 답 안에서 SAME/DIFFERENT를 찾아 판단하며, 둘 다 없으면 한 번만 다시 묻는다(그래도 없으면 '다른 정보').
+- 시험: `py_compile` 통과. 실제 메시지로 Gemini 5회 모두 DIFFERENT. 답 해석 8가지(SAME, **SAME**, Same, 잘림→재시도 SAME, 두 번 잘림, None 등) 모두 기대대로. CLI 오류 4가지(MCP 경고가 stderr/stdout 끝줄 등)에서 실제 오류만 남음.
+
+### 2026-11-23 피드백 방: "codex는 왜 실패했어?" (피드백 48)
+- 상태: 완료 (코드 수정은 피드백 방 'push'·'진행'·'반영' 때 배포)
+- 요청: 앞 보고(피드백 36~45)의 "11/22 18:00은 codex도 420초 시간 초과"에 대해 "codex는 왜 실패했어?".
+- 진단: 로그 11/22 18:07:28 "codex CLI 실패 … timed out after 420 seconds". `codex exec`가 `DIGEST_CLI_TIMEOUT`(420초) 안에 답을 내지 못해 봇이 끊었고, 곧바로 Gemini가 정리를 써서 18:07:35에 보냈다. 다른 회차 codex 소요는 67~171초(11/21 18시 171초, 11/22 08시 67초, 11/23 08시 107초)라 이번만 크게 느렸다. 오류로 끝난 게 아니라 응답이 안 온 것이고, 시간 초과 때는 codex 출력이 버려져 OpenAI 쪽 지연인지 다른 이유인지는 남은 기록으로 가릴 수 없다(`--ephemeral`이라 codex 세션 기록도 없음).
+- 처리: `_call_cli`가 `subprocess.TimeoutExpired`를 잡아 그때까지 나온 stderr·stdout 끝부분(MCP 경고 줄 제외)을 "N초 시간 초과, 마지막 출력: …"으로 남긴다. 출력 정리는 `_cli_output_tail()`로 빼서 오류 종료와 같이 쓴다. 다음에 또 시간 초과가 나면 이 로그로 어디서 멈췄는지 본다.
+- 시험: `py_compile` 통과. 가짜 codex(진행 출력 후 멈춤, 시간 한도 2초) → "2초 시간 초과, 마지막 출력: model: gpt-x / thinking..."(MCP 줄 빠짐), 오류 종료 가짜 codex → "exit 1: real error here".
+- 알아둘 점: 시간 한도(420초)는 늘리지 않았다. 늘리면 정리 발송이 그만큼 늦어지고 Gemini 폴백이 정상 동작했기 때문. 자주 반복되면 그때 한도나 순서를 다시 본다.

@@ -1762,6 +1762,16 @@ def _cli_bin(name: str) -> str:
     return shutil.which(name) or f"/opt/homebrew/bin/{name}"
 
 
+def _cli_output_tail(stderr, stdout, limit: int = 300) -> str:
+    """CLI 출력 끝부분. 끝줄이 MCP 경고([mcp-sdk] …)면 실제 오류가 가려지므로 그런 줄은 뺌.
+    경고는 stderr, 실제 오류는 stdout에 있을 수 있어 둘 다 봄."""
+    def _s(v):
+        return v.decode("utf-8", errors="replace") if isinstance(v, bytes) else (v or "")
+    out = f"{_s(stderr)}\n{_s(stdout)}".strip()
+    lines = [l for l in out.splitlines() if l.strip() and not l.lstrip().startswith("[mcp")]
+    return ("\n".join(lines) or out)[-limit:]
+
+
 def _call_cli(provider: str, prompt: str) -> str:
     """구독형 CLI를 대화창 없이 한 번 실행해 최종 답만 받음. 도구·세션 저장 없이, 빈 임시
     폴더에서 실행해 저장소 파일을 읽지 않게 함."""
@@ -1780,10 +1790,16 @@ def _call_cli(provider: str, prompt: str) -> str:
                 cmd += ["--model", DIGEST_CLAUDE_MODEL]
         else:
             raise ValueError(f"알 수 없는 CLI provider: {provider}")
-        proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, cwd=work,
-                              timeout=DIGEST_CLI_TIMEOUT)
+        try:
+            proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, cwd=work,
+                                  timeout=DIGEST_CLI_TIMEOUT)
+        except subprocess.TimeoutExpired as e:
+            # 시간 초과면 어디서 멈췄는지 보이게 그때까지 나온 출력 끝부분을 남김
+            # (시간 초과 시 출력은 text=True여도 bytes로 옴)
+            raise RuntimeError(f"{DIGEST_CLI_TIMEOUT}초 시간 초과, 마지막 출력: "
+                               f"{_cli_output_tail(e.stderr, e.stdout) or '(없음)'}") from None
         if proc.returncode != 0:
-            raise RuntimeError(f"exit {proc.returncode}: {(proc.stderr or proc.stdout).strip()[-300:]}")
+            raise RuntimeError(f"exit {proc.returncode}: {_cli_output_tail(proc.stderr, proc.stdout)}")
         answer = (Path(out_file).read_text(encoding="utf-8") if provider == "codex" else proc.stdout).strip()
         if not answer:
             raise RuntimeError("빈 응답")
@@ -1919,11 +1935,18 @@ def ask_llm_same_info(text_a: str, text_b: str) -> bool:
         "답은 반드시 SAME 또는 DIFFERENT 한 단어로만 답해.\n\n"
         f"[메시지 A]\n{text_a}\n\n[메시지 B]\n{text_b}"
     )
-    answer = call_llm(prompt, max_tokens=10)
-    if answer is None:
-        log.warning("LLM 판단 실패, 안전하게 '다른 정보'로 처리")
-        return False
-    return answer.strip().upper().startswith("SAME")
+    # 가끔 "제시된 두 메시지를…"처럼 설명부터 쓰다 한도에 잘려 답이 없음 → 여유를 두고, 답 단어가
+    # 없으면 한 번만 다시 묻는다
+    for attempt in range(2):
+        answer = call_llm(prompt, max_tokens=32)
+        if answer is None:
+            log.warning("LLM 판단 실패, 안전하게 '다른 정보'로 처리")
+            return False
+        verdict = re.search(r"SAME|DIFFERENT", answer.upper())
+        if verdict:
+            return verdict.group(0) == "SAME"
+        log.info(f"중복 판단 답에 SAME/DIFFERENT가 없음({attempt + 1}회차): {answer[:40]!r}")
+    return False
 
 
 TRUMP_WORDING_INSTRUCTION = (
