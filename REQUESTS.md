@@ -1195,3 +1195,17 @@
 - 상태: 완료
 - 원인: 이 패널은 하루 단위로 묶어 KST 그날 0시 시각에 한 점을 찍는다(`date(ts, '+9 hours')`). 대시보드 기간을 24시간으로 줄이면 그날 묶음이 0시 막대로만 보인다. 실제 시각은 "최근 조회 50건" 표에 있다.
 - 처리: 패널에 `timeFrom: 30d`를 넣어 대시보드 기간과 관계없이 최근 30일을 하루 막대로 보이게 했다. Grafana API로 반영 확인.
+
+### 2026-11-25 Grafana 주소를 miori.my로 옮기고 miori.store 정리
+- 상태: 거의 완료 (Access 대상의 `grafana.miori.store` 삭제는 사용자가 할 일)
+- 배경: miori.store(가비아, 11/24 만료)는 연장하지 않는다. 새 도메인 miori.my(가비아 등록). bookmark는 사용자가 따로 옮겼다.
+- 바뀐 것:
+  - 가비아 miori.my 네임서버 → `chance.ns.cloudflare.com`, `walk.ns.cloudflare.com`(Cloudflare 계정의 기존 짝). .my는 네임서버가 그 도메인을 실제로 맡고 있는지 검사하므로 Cloudflare에 도메인을 먼저 추가해야 저장된다. 등록소 기록(RDAP)은 14:49, 등록소 DNS 반영은 15:00.
+  - Cloudflare Access 애플리케이션 "grafana"에 `grafana.miori.my` 추가(사용자가 저장, 세션의 보안 설정 변경은 권한 검사에 막힘).
+  - miori.my DNS: `grafana` CNAME → 터널 `grafana-mac`(프록시). `cloudflared tunnel route dns`는 로그인 인증서가 miori.store 전용이라 `grafana.miori.my.miori.store`를 만들어서 대시보드에서 직접 만들었다.
+  - `~/.cloudflared/config.yml` ingress: `grafana.miori.store` → `grafana.miori.my`(Access JWT 검사 그대로, 백업 `config.yml.bak-*`). LaunchAgent 재시작.
+  - `.env` `GRAFANA_ROOT_URL=https://grafana.miori.my/`(백업 `.env.bak-*`), `up.sh grafana`로 Grafana만 재생성.
+  - Cloudflare에서 miori.store 도메인 제거(사용자 확인 후, 잘못 생긴 레코드 포함).
+- 확인: 새 주소가 Access 로그인(302)으로 가고, 사용자가 폰에서 열림 확인. 공용 DNS(1.1.1.1, 8.8.8.8) 조회됨.
+- 알아둘 점: 이 맥은 Tailscale DNS(100.100.100.100)가 옛 "없음" 응답을 최대 3시간 기억해 맥 Chrome에서 한동안 안 열렸다(KT DNS는 정상). Tailscale을 껐다 켜거나 기다리면 된다.
+- 사용자가 할 일: Zero Trust → 액세스 제어 → 애플리케이션 → grafana → 대상에서 `grafana.miori.store` 줄 삭제 후 저장.
