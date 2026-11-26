@@ -3601,8 +3601,9 @@ def render_digest_html(
 # 재전송 큐까지 안 가고 이 자리에서 바로 몇 번 재시도하면 대부분 즉시 복구됨.
 _telegram_bot_api_session = requests.Session()
 _telegram_bot_api_session.mount("https://", HTTPAdapter(max_retries=Retry(
-    # 연결 실패만 재시도. 응답 시간 초과는 텔레그램이 이미 받았을 수 있어 다시 보내면 중복이 됨
-    total=3, connect=3, read=0, backoff_factor=0.3,
+    # 연결 실패만 재시도. 응답 시간 초과는 텔레그램이 이미 받았을 수 있어 다시 보내면 중복이 됨.
+    # read=False여야 ReadTimeout으로 올라온다(read=0이면 ConnectionError로 바뀌어 호출부가 구분 못 함)
+    total=3, connect=3, read=False, backoff_factor=0.3,
     allowed_methods=frozenset(["POST"]),
 )))
 
@@ -3835,6 +3836,12 @@ async def main():
             else:
                 sent_msg = await client.send_message(summary_entity, body)
                 msg_id = sent_msg.id
+        except requests.exceptions.ReadTimeout as e:
+            log.warning(
+                f"요약 채널 전송 응답 시간 초과 → 텔레그램이 이미 올렸을 수 있어 다시 보내지 않음: "
+                f"{log_label!r} ({e})"
+            )
+            return None
         except Exception as e:
             if isinstance(e, FloodWaitError):
                 _note_flood_wait("user", e.seconds)
@@ -4189,6 +4196,10 @@ async def main():
                         else:
                             sent_msg = await client.send_message(summary_entity, text)
                             msg_id = sent_msg.id
+                except requests.exceptions.ReadTimeout as e:
+                    # 텔레그램이 이미 받았을 수 있어 다시 보내면 중복이 됨 → 보낸 것으로 보고 큐에서 뺌
+                    log.warning(f"재전송 응답 시간 초과 → 이미 올라갔을 수 있어 큐에서 제거 (id={row_id}): {e}")
+                    msg_id = SEND_UNCONFIRMED
                 except Exception as e:
                     if isinstance(e, FloodWaitError):
                         _note_flood_wait("user", e.seconds)
