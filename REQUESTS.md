@@ -1211,7 +1211,7 @@
 - 사용자가 할 일: Zero Trust → 액세스 제어 → 애플리케이션 → grafana → 대상에서 `grafana.miori.store` 줄 삭제 후 저장.
 
 ### 2026-11-26 로그 채팅방에 "502 Bad Gateway" 경고가 온 이유
-- 상태: 진행중 (커밋만 함, push·미러 대기)
+- 상태: 완료 (0c70c92 배포 11/26 10:38, 미러 f02256f)
 - 처리: 11/26 10:12 텔레그램 봇 API가 잠깐 502를 돌려줘 <비공개> 사진 1건과 텍스트 1건이 재전송 큐로 갔고, 10:12:57(사진)과 10:13:32(텍스트)에 다시 보냈다. 봇과 Grafana 문제는 아니다(같은 502가 11/17, 11/25에도 한 번씩 있었고 모두 재전송으로 해결).
 - 찾은 버그: 텍스트를 다시 보낼 때 10:12:47에 응답 시간 초과가 났는데 실패로 보고 10:13:32에 또 보냈다. 첫 번째 전송이 텔레그램에 이미 올라갔다면 요약 채널에 같은 글이 두 번 있을 수 있다("속보: 미국이 AI 칩 수출 규제를 강화하면서 글로벌 금융사들이 아시아..."). 원인: `_telegram_bot_api_session`의 `Retry(read=0)`이면 urllib3가 응답 시간 초과를 `MaxRetryError`로 감싸고 requests는 이를 `ConnectionError`로 바꾼다. 그래서 "응답 시간 초과는 다시 보내지 않는다" 처리가 이 세션을 쓰는 텍스트 전송(`send_bot_notification`)에서는 동작하지 않았다. 사진과 앨범은 `requests.post`를 직접 써서 영향이 없었다.
 - 바뀐 것(`main.py`): `Retry(read=False)`로 바꿔 `ReadTimeout`이 그대로 올라오게 했다. `send_to_summary_chat`은 `ReadTimeout`이면 재전송 큐에 넣지 않고 None을 돌려준다(이전 요약 링크는 저장하지 않음). `_retry_send_queue_loop`는 `ReadTimeout`이면 `SEND_UNCONFIRMED`로 보고 큐에서 뺀다.
